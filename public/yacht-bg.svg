@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 380 600" preserveAspectRatio="xMidYMin slice">
+  <!-- Cartoon ocean color matched to design concept -->
+  <rect x="0" y="0" width="380" height="600" fill="#5fc7f6"/>
+
+  <!-- Subtle toon wave shimmer: two stripes drifting horizontally -->
+  <g opacity="0.45">
+    <g>
+      <path d="M -100 70 Q -60 60 -20 70 T 60 70 T 140 70 T 220 70 T 300 70 T 380 70 T 460 70 T 540 70"
+            stroke="#ffffff" stroke-width="3" fill="none" stroke-linecap="round"/>
+      <animateTransform attributeName="transform" type="translate"
+                        from="0 0" to="160 0" dur="6s" repeatCount="indefinite"/>
+    </g>
+    <g>
+      <path d="M -100 130 Q -60 120 -20 130 T 60 130 T 140 130 T 220 130 T 300 130 T 380 130 T 460 130 T 540 130"
+            stroke="#ffffff" stroke-width="2.2" fill="none" stroke-linecap="round" opacity="0.85"/>
+      <animateTransform attributeName="transform" type="translate"
+                        from="0 0" to="-160 0" dur="9s" repeatCount="indefinite"/>
+    </g>
+    <g>
+      <path d="M -100 32 Q -60 24 -20 32 T 60 32 T 140 32 T 220 32 T 300 32 T 380 32 T 460 32 T 540 32"
+            stroke="#ffffff" stroke-width="2" fill="none" stroke-linecap="round" opacity="0.7"/>
+      <animateTransform attributeName="transform" type="translate"
+                        from="0 0" to="120 0" dur="11s" repeatCount="indefinite"/>
+    </g>
+  </g>
+
+  <!-- Yacht deck — flush against the water with a soft rounded top, no white outline -->
+  <path d="M 0 220
+           Q 0 192 28 192
+           L 352 192
+           Q 380 192 380 220
+           L 380 600
+           L 0 600 Z"
+        fill="#f6c87e"/>
+</svg>

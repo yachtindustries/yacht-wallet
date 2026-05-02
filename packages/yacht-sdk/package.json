@@ -1,0 +1,24 @@
+{
+  "name": "@yacht/sdk",
+  "version": "0.1.0",
+  "description": "Detect, connect to, and sign transactions with the Yacht ApeChain browser-extension wallet.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": ["dist", "README.md"],
+  "keywords": ["apechain", "ape", "wallet", "yacht", "extension", "evm", "eip-1193"],
+  "scripts": {
+    "build": "tsc -p tsconfig.json"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.3"
+  },
+  "license": "MIT"
+}

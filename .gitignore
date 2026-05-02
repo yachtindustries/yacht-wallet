@@ -1,0 +1,10 @@
+node_modules
+dist
+dist-zip
+.DS_Store
+*.log
+.env
+.env.local
+.vite
+tsconfig.tsbuildinfo
+.claude

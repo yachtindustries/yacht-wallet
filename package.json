@@ -1,0 +1,41 @@
+{
+  "name": "yacht",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Yacht — self-custody ApeChain browser extension wallet",
+  "type": "module",
+  "scripts": {
+    "icons": "node scripts/generate-icons.mjs",
+    "prebuild": "node scripts/generate-icons.mjs",
+    "predev": "node scripts/generate-icons.mjs",
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc -b --noEmit",
+    "package": "npm run build && node scripts/package.mjs",
+    "validate": "node scripts/validate-store-package.mjs"
+  },
+  "dependencies": {
+    "@fontsource/roboto": "^5.2.10",
+    "@noble/hashes": "^1.8.0",
+    "ethers": "^6.13.4",
+    "qrcode": "^1.5.4",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-router-dom": "^6.28.0",
+    "zustand": "^5.0.1"
+  },
+  "devDependencies": {
+    "@crxjs/vite-plugin": "^2.0.0-beta.28",
+    "@types/chrome": "^0.0.287",
+    "@types/qrcode": "^1.5.5",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.3",
+    "autoprefixer": "^10.4.20",
+    "postcss": "^8.4.49",
+    "tailwindcss": "^3.4.15",
+    "typescript": "^5.6.3",
+    "vite": "^5.4.11"
+  }
+}
