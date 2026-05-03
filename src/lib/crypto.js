@@ -16,12 +16,12 @@ const ARGON2_PARALLELISM = 1;
 const SALT_BYTES = 16;
 const IV_BYTES = 12;
 const KEY_BITS = 256;
-function toB64(bytes) {
+export function toB64(bytes) {
     let bin = '';
     bytes.forEach((b) => (bin += String.fromCharCode(b)));
     return btoa(bin);
 }
-function fromB64(b64) {
+export function fromB64(b64) {
     const bin = atob(b64);
     const out = new Uint8Array(bin.length);
     for (let i = 0; i < bin.length; i++)
@@ -32,38 +32,64 @@ async function importAesKey(rawKey) {
     return crypto.subtle.importKey('raw', rawKey, { name: 'AES-GCM', length: KEY_BITS }, false, ['encrypt', 'decrypt']);
 }
 // --- v2 (Argon2id) ----------------------------------------------------------
-async function deriveKeyV2(password, salt) {
+function deriveKeyBytesV2(password, salt) {
     const pwBytes = new TextEncoder().encode(password);
     // @noble/hashes argon2id is pure JS but takes ~700-1500ms with these params,
     // which is acceptable for an unlock flow.
-    const raw = argon2id(pwBytes, salt, {
+    return argon2id(pwBytes, salt, {
         t: ARGON2_ITERATIONS,
         m: ARGON2_MEMORY_KIB,
         p: ARGON2_PARALLELISM,
         dkLen: 32,
     });
-    return await importAesKey(raw);
 }
 // --- v1 (PBKDF2) — legacy decrypt only --------------------------------------
-async function deriveKeyV1(password, salt) {
-    const baseKey = await crypto.subtle.importKey('raw', new TextEncoder().encode(password), 'PBKDF2', false, ['deriveKey']);
-    return crypto.subtle.deriveKey({ name: 'PBKDF2', salt: salt, iterations: PBKDF2_ITERATIONS, hash: 'SHA-256' }, baseKey, { name: 'AES-GCM', length: KEY_BITS }, false, ['encrypt', 'decrypt']);
+async function deriveKeyBytesV1(password, salt) {
+    const baseKey = await crypto.subtle.importKey('raw', new TextEncoder().encode(password), 'PBKDF2', false, ['deriveBits']);
+    const bits = await crypto.subtle.deriveBits({ name: 'PBKDF2', salt: salt, iterations: PBKDF2_ITERATIONS, hash: 'SHA-256' }, baseKey, KEY_BITS);
+    return new Uint8Array(bits);
 }
+/** Encrypt a fresh plaintext under a new salt derived from the password. */
 export async function encrypt(plaintext, password) {
     const salt = crypto.getRandomValues(new Uint8Array(SALT_BYTES));
+    const keyBytes = deriveKeyBytesV2(password, salt);
+    return await encryptWithKey(plaintext, keyBytes, salt);
+}
+/**
+ * Re-encrypt under an existing key + salt (no KDF).
+ *
+ * This is the workhorse for `persistUnlocked`: after `unlockAndExtract`, we
+ * keep the AES key bytes in memory and use them to re-encrypt the vault on
+ * every account-list change. The salt is reused (so the same password keeps
+ * decrypting future blobs); only the IV changes.
+ */
+export async function encryptWithKey(plaintext, keyBytes, salt) {
     const iv = crypto.getRandomValues(new Uint8Array(IV_BYTES));
-    const key = await deriveKeyV2(password, salt);
+    const key = await importAesKey(keyBytes);
     const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv: iv }, key, new TextEncoder().encode(plaintext));
     return { v: 2, salt: toB64(salt), iv: toB64(iv), ct: toB64(new Uint8Array(ct)) };
 }
+/** Decrypt and return only the plaintext. Use this when you don't need the key. */
 export async function decrypt(blob, password) {
+    const { plaintext } = await unlockAndExtract(blob, password);
+    return plaintext;
+}
+/**
+ * Decrypt and ALSO surface the derived AES key + salt to the caller.
+ * The background uses this so it can re-encrypt the vault later without
+ * keeping the password in memory or in chrome.storage.session.
+ */
+export async function unlockAndExtract(blob, password) {
     const salt = fromB64(blob.salt);
     const iv = fromB64(blob.iv);
     const ct = fromB64(blob.ct);
     const v = blob.v ?? 1; // default to v1 if missing for safety
-    const key = v === 2 ? await deriveKeyV2(password, salt) : await deriveKeyV1(password, salt);
+    const keyBytes = v === 2
+        ? deriveKeyBytesV2(password, salt)
+        : await deriveKeyBytesV1(password, salt);
+    const key = await importAesKey(keyBytes);
     const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: iv }, key, ct);
-    return new TextDecoder().decode(pt);
+    return { plaintext: new TextDecoder().decode(pt), keyBytes, salt };
 }
 // True if the blob uses the legacy KDF and should be re-encrypted on next save.
 export function needsKdfUpgrade(blob) {

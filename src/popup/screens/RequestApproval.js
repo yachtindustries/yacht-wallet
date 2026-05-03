@@ -34,28 +34,12 @@ export default function RequestApproval() {
         setBusy(true);
         setErr(null);
         try {
-            if (req.type === 'connect') {
-                await rpc({ type: 'request.resolve', id: req.id, result: { address: active.address, chainId: '0x8173' } });
-                window.close();
-            }
-            else if (req.type === 'signTx') {
-                const tx = req.payload.tx;
-                const r = await rpc({ type: 'evm.sign.tx', account: active.address, tx });
-                await rpc({ type: 'request.resolve', id: req.id, result: r });
-                window.close();
-            }
-            else if (req.type === 'personalSign') {
-                const message = req.payload.message;
-                const r = await rpc({ type: 'evm.sign.message', account: active.address, message });
-                await rpc({ type: 'request.resolve', id: req.id, result: r });
-                window.close();
-            }
-            else if (req.type === 'signTypedData') {
-                const payload = req.payload.typedData;
-                const r = await rpc({ type: 'evm.sign.typedData', account: active.address, payload });
-                await rpc({ type: 'request.resolve', id: req.id, result: r });
-                window.close();
-            }
+            // SECURITY: we send only the request ID. The background re-reads its
+            // own copy of the pending payload and signs that — never the version
+            // this popup is showing. So a compromised popup renderer can't make us
+            // sign a different tx than what the user saw.
+            await rpc({ type: 'request.approve', id: req.id });
+            window.close();
         }
         catch (e) {
             setErr(e.message);

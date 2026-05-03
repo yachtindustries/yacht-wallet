@@ -82,7 +82,14 @@ export default function ImportWallet() {
         <label className="label mt-3">Wallet password</label>
         <PasswordField value={pw} onChange={setPw} showStrength />
         <label className="label mt-3">Confirm password</label>
-        <input className="input" type="password" value={pw2} onChange={(e) => setPw2(e.target.value)} />
+        <input
+          className="input"
+          type="password"
+          autoComplete="new-password"
+          spellCheck={false}
+          value={pw2}
+          onChange={(e) => setPw2(e.target.value)}
+        />
         {err && <div className="text-danger text-xs mt-2">{err}</div>}
         <button
           className="btn-primary w-full mt-4"

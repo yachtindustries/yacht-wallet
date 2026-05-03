@@ -18,6 +18,17 @@ export default defineManifest({
         type: 'module',
     },
     content_scripts: [
+        // The inpage provider runs in the page's MAIN world so it can attach
+        // window.yacht / window.ethereum directly. Declaring it as its own
+        // content_scripts entry lets crxjs bundle it correctly and avoids the
+        // MIME-type pitfall of injecting a literal .ts URL via DOM <script>.
+        {
+            matches: ['<all_urls>'],
+            js: ['src/inpage/index.ts'],
+            run_at: 'document_start',
+            all_frames: false,
+            world: 'MAIN',
+        },
         {
             matches: ['<all_urls>'],
             js: ['src/content/index.ts'],
@@ -27,7 +38,7 @@ export default defineManifest({
     ],
     web_accessible_resources: [
         {
-            resources: ['src/inpage/index.ts', 'public/logo.png', 'public/nav/*.png', 'public/actions/*.png'],
+            resources: ['public/logo.png', 'public/nav/*.png', 'public/actions/*.png'],
             matches: ['<all_urls>'],
         },
     ],

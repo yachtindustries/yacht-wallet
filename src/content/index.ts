@@ -11,15 +11,10 @@
 import { rpc } from '@/lib/messaging';
 import type { TypedDataPayload, UnsignedEvmTx } from '@/lib/messaging';
 
-(function injectProvider() {
-  const url = chrome.runtime.getURL('src/inpage/index.ts');
-  const s = document.createElement('script');
-  s.src = url;
-  s.type = 'module';
-  s.async = false;
-  (document.head || document.documentElement).appendChild(s);
-  s.onload = () => s.remove();
-})();
+// The inpage provider is injected as its own MAIN-world content script (see
+// manifest.config.ts), not via a manually-appended <script>. This avoids the
+// MIME-type rejection Chrome enforces for module scripts and lets crxjs
+// bundle the inpage source correctly.
 
 const RPC_PREFIX = 'yacht.dapp';
 
@@ -109,10 +104,27 @@ window.addEventListener('message', async (event) => {
         return reply(false, 'Yacht only supports ApeChain (chainId 0x8173)');
       }
       case 'wallet_addEthereumChain': {
-        // Yacht is single-chain. Pretend success if it's ApeChain, refuse otherwise.
-        const params = data.params?.[0] as { chainId?: string } | undefined;
-        if (params?.chainId === '0x8173') return reply(true, null);
-        return reply(false, 'Yacht only supports ApeChain');
+        // Yacht is single-chain ApeChain. We accept the call only if the
+        // dApp supplies the correct ApeChain config — otherwise we refuse
+        // (so a dApp can't trick us into "approving" a malicious RPC URL by
+        // bundling it under chainId 0x8173).
+        const params = data.params?.[0] as {
+          chainId?: string;
+          rpcUrls?: string[];
+          nativeCurrency?: { symbol?: string; decimals?: number };
+        } | undefined;
+        if (params?.chainId !== '0x8173') {
+          return reply(false, 'Yacht only supports ApeChain (chainId 0x8173)');
+        }
+        const sym = params.nativeCurrency?.symbol;
+        if (sym && sym !== 'APE') {
+          return reply(false, 'ApeChain native currency must be APE');
+        }
+        const rpcs = params.rpcUrls ?? [];
+        if (rpcs.length > 0 && !rpcs.some((u) => u === 'https://rpc.apechain.com')) {
+          return reply(false, 'ApeChain RPC must be https://rpc.apechain.com (Yacht ignores dApp-supplied RPCs)');
+        }
+        return reply(true, null);
       }
       case 'getAddress': {
         const r = await rpc({ type: 'dapp.getAddress' });

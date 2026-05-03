@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Page, Screen, TopBar } from '../components/Layout';
 import { useApp } from '../store';
@@ -22,6 +22,20 @@ export default function Accounts() {
   const [revealedMnemonic, setRevealedMnemonic] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+
+  // Auto-clear revealed secrets after 60s of inactivity, on tab blur, and on
+  // unmount. JS strings can't be securely zeroed; this just shrinks the
+  // window during which the secret sits in popup memory.
+  useEffect(() => {
+    if (!revealedPk && !revealedMnemonic) return;
+    const clear = () => { setRevealedPk(null); setRevealedMnemonic(null); };
+    const timer = window.setTimeout(clear, 60_000);
+    window.addEventListener('blur', clear);
+    return () => {
+      window.clearTimeout(timer);
+      window.removeEventListener('blur', clear);
+    };
+  }, [revealedPk, revealedMnemonic]);
 
   async function activate(id: string) {
     await rpc({ type: 'vault.account.activate', id });
@@ -215,7 +229,15 @@ export default function Accounts() {
             </p>
             {!revealedPk ? (
               <>
-                <input className="input" type="password" value={revealPw} onChange={(e) => setRevealPw(e.target.value)} placeholder="Wallet password" />
+                <input
+                  className="input"
+                  type="password"
+                  autoComplete="current-password"
+                  spellCheck={false}
+                  value={revealPw}
+                  onChange={(e) => setRevealPw(e.target.value)}
+                  placeholder="Wallet password"
+                />
                 {err && <div className="text-danger text-xs mt-2">{err}</div>}
                 <div className="flex gap-2 mt-4">
                   <button className="btn-ghost flex-1" onClick={() => setMode('list')}>Cancel</button>
@@ -242,7 +264,15 @@ export default function Accounts() {
             </p>
             {!revealedMnemonic ? (
               <>
-                <input className="input" type="password" value={revealPw} onChange={(e) => setRevealPw(e.target.value)} placeholder="Wallet password" />
+                <input
+                  className="input"
+                  type="password"
+                  autoComplete="current-password"
+                  spellCheck={false}
+                  value={revealPw}
+                  onChange={(e) => setRevealPw(e.target.value)}
+                  placeholder="Wallet password"
+                />
                 {err && <div className="text-danger text-xs mt-2">{err}</div>}
                 <div className="flex gap-2 mt-4">
                   <button className="btn-ghost flex-1" onClick={() => setMode('list')}>Cancel</button>

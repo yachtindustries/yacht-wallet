@@ -215,12 +215,82 @@ const ERC721_ABI = [
     'function ownerOf(uint256) view returns (address)',
 ];
 const erc721Iface = new Interface(ERC721_ABI);
+// Pool of public IPFS gateways. We rotate per-request so a single gateway
+// compromise / outage doesn't take down all NFT loading, and so no single
+// gateway sees every Yacht user's NFT browsing.
+const IPFS_GATEWAYS = [
+    'https://ipfs.io/ipfs/',
+    'https://cloudflare-ipfs.com/ipfs/',
+    'https://gateway.pinata.cloud/ipfs/',
+    'https://nftstorage.link/ipfs/',
+];
+function pickIpfsGateway() {
+    return IPFS_GATEWAYS[Math.floor(Math.random() * IPFS_GATEWAYS.length)];
+}
 function ipfsToHttp(uri) {
     if (uri.startsWith('ipfs://')) {
         const path = uri.replace(/^ipfs:\/\//, '').replace(/^ipfs\//, '');
-        return `https://ipfs.io/ipfs/${path}`;
+        return `${pickIpfsGateway()}${path}`;
     }
     return uri;
+}
+/**
+ * Anti-SSRF guard. NFT tokenURI is contract-controlled and an attacker could
+ * point it at internal services. We accept ONLY:
+ *   - https:// URLs whose host is not an RFC1918 / loopback / link-local IP
+ *   - data: URLs (decoded inline, no fetch)
+ * Anything else (http://, ftp://, file://, internal IPs) is rejected.
+ */
+function isSafeMetadataUrl(url) {
+    if (url.startsWith('data:'))
+        return true;
+    let parsed;
+    try {
+        parsed = new URL(url);
+    }
+    catch {
+        return false;
+    }
+    if (parsed.protocol !== 'https:')
+        return false;
+    const host = parsed.hostname;
+    if (!host)
+        return false;
+    // Block explicit IPs in private ranges. Hostnames go through DNS at fetch
+    // time; we can't perfectly resolve them here, but blocking literal-IP
+    // private addresses kills the most common SSRF probes.
+    if (/^(localhost|0\.0\.0\.0)$/i.test(host))
+        return false;
+    // IPv4 private ranges: 10.x, 172.16-31.x, 192.168.x, 127.x, 169.254.x, 100.64-127.x
+    const v4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
+    if (v4) {
+        const a = +v4[1], b = +v4[2];
+        if (a === 10)
+            return false;
+        if (a === 127)
+            return false;
+        if (a === 172 && b >= 16 && b <= 31)
+            return false;
+        if (a === 192 && b === 168)
+            return false;
+        if (a === 169 && b === 254)
+            return false;
+        if (a === 100 && b >= 64 && b <= 127)
+            return false;
+        if (a === 0)
+            return false;
+    }
+    // IPv6: any literal address in brackets — block ::1, fc00::/7, fe80::/10, etc.
+    if (host.startsWith('[') && host.endsWith(']')) {
+        const v6 = host.slice(1, -1).toLowerCase();
+        if (v6 === '::1' || v6 === '::')
+            return false;
+        if (/^fc/.test(v6) || /^fd/.test(v6))
+            return false; // ULA fc00::/7
+        if (/^fe[89ab]/.test(v6))
+            return false; // link-local fe80::/10
+    }
+    return true;
 }
 async function fetchNftMetadata(network, contract, tokenId) {
     try {
@@ -235,16 +305,29 @@ async function fetchNftMetadata(network, contract, tokenId) {
             return {};
         const url = ipfsToHttp(uri);
         if (url.startsWith('data:application/json')) {
-            const json = JSON.parse(url.split(',')[1] ?? '{}');
-            return { image: json.image ? ipfsToHttp(json.image) : undefined, name: json.name };
+            const comma = url.indexOf(',');
+            if (comma < 0)
+                return {};
+            const isB64 = url.slice(0, comma).includes(';base64');
+            const payload = isB64 ? atob(url.slice(comma + 1)) : decodeURIComponent(url.slice(comma + 1));
+            const json = JSON.parse(payload);
+            const imageUrl = json.image ? ipfsToHttp(json.image) : undefined;
+            // Guard the image URL the same way before returning it for <img> use.
+            return {
+                image: imageUrl && isSafeMetadataUrl(imageUrl) ? imageUrl : undefined,
+                name: typeof json.name === 'string' ? json.name : undefined,
+            };
         }
+        if (!isSafeMetadataUrl(url))
+            return {};
         const r = await fetch(url);
         if (!r.ok)
             return {};
         const meta = await r.json();
+        const imageUrl = meta?.image ? ipfsToHttp(meta.image) : undefined;
         return {
-            image: meta?.image ? ipfsToHttp(meta.image) : undefined,
-            name: meta?.name,
+            image: imageUrl && isSafeMetadataUrl(imageUrl) ? imageUrl : undefined,
+            name: typeof meta?.name === 'string' ? meta.name : undefined,
         };
     }
     catch {
@@ -299,7 +382,7 @@ export async function getOwnedNfts(network, address, withMetadata = true) {
 }
 const MAX_GAS_LIMIT = 1500000n; // sanity cap for non-contract sends
 const MAX_GAS_PRICE_GWEI = 500n; // refuse a runaway gasPrice
-async function buildOverrides(provider, request) {
+async function buildOverrides(provider, request, fromAddress) {
     const fee = await provider.getFeeData();
     const overrides = { ...(request ?? {}) };
     // Prefer EIP-1559. Fall back to legacy gasPrice if the chain returns it.
@@ -319,13 +402,19 @@ async function buildOverrides(provider, request) {
             throw new Error(`Network suggested ${k} > ${MAX_GAS_PRICE_GWEI} gwei — refusing`);
         }
     }
+    // Pin nonce against the 'pending' tag so back-to-back queued sends from the
+    // same account don't reuse a stale nonce when the previous tx hasn't been
+    // mined yet (ApeChain ~1s blocks make this race rare but real).
+    if (overrides.nonce == null && fromAddress) {
+        overrides.nonce = await provider.getTransactionCount(fromAddress, 'pending');
+    }
     return overrides;
 }
 export async function sendNative(network, privateKey, to, amountApe) {
     const provider = getProvider(network);
     const wallet = new Wallet(privateKey, provider);
     const valueWei = parseUnits(amountApe, NETWORKS[network].nativeDecimals);
-    const overrides = await buildOverrides(provider, { to, value: valueWei });
+    const overrides = await buildOverrides(provider, { to, value: valueWei }, wallet.address);
     const gasEstimate = await provider.estimateGas({ from: wallet.address, to, value: valueWei });
     if (gasEstimate > MAX_GAS_LIMIT)
         throw new Error('Estimated gas is unreasonable');
@@ -347,8 +436,10 @@ export async function sendErc20(network, privateKey, token, to, amountDisplay) {
     const info = await getErc20Info(network, token);
     const value = parseUnits(amountDisplay, info.decimals);
     const data = erc20Iface.encodeFunctionData('transfer', [to, value]);
-    const overrides = await buildOverrides(provider, { to: token, data });
+    const overrides = await buildOverrides(provider, { to: token, data }, wallet.address);
     const gasEstimate = await provider.estimateGas({ from: wallet.address, to: token, data });
+    if (gasEstimate > MAX_GAS_LIMIT)
+        throw new Error('Estimated gas is unreasonable');
     overrides.gasLimit = (gasEstimate * 12n) / 10n;
     const tx = await wallet.sendTransaction(overrides);
     const receipt = await tx.wait();
@@ -365,15 +456,21 @@ export async function sendErc20(network, privateKey, token, to, amountDisplay) {
 export async function signGenericTransaction(network, privateKey, request) {
     const provider = getProvider(network);
     const wallet = new Wallet(privateKey, provider);
-    const overrides = await buildOverrides(provider, request);
-    if (!overrides.gasLimit) {
-        try {
-            const est = await provider.estimateGas({ ...overrides, from: wallet.address });
-            overrides.gasLimit = (est * 12n) / 10n;
-        }
-        catch {
-            // let the chain reject if it must
-        }
+    const overrides = await buildOverrides(provider, request, wallet.address);
+    // Always derive gasLimit from estimation; never trust an attacker-supplied
+    // value. Cap the result to MAX_GAS_LIMIT so a malicious dApp cannot drain
+    // APE via inflated gas burn even if estimation succeeds for some absurd value.
+    delete overrides.gasLimit;
+    delete overrides.gas;
+    delete overrides.nonce;
+    delete overrides.chainId;
+    const est = await provider.estimateGas({ ...overrides, from: wallet.address });
+    if (est > MAX_GAS_LIMIT) {
+        throw new Error(`Gas estimate ${est} exceeds wallet cap ${MAX_GAS_LIMIT}`);
+    }
+    overrides.gasLimit = (est * 12n) / 10n;
+    if (overrides.gasLimit > MAX_GAS_LIMIT) {
+        overrides.gasLimit = MAX_GAS_LIMIT;
     }
     const tx = await wallet.sendTransaction(overrides);
     const receipt = await tx.wait();

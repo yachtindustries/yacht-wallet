@@ -46,10 +46,21 @@ window.addEventListener('message', (event) => {
   else cb.reject(new Error(typeof data.error === 'string' ? data.error : 'Wallet error'));
 });
 
+// 5-minute TTL on pending entries so an abandoned request (user closed the
+// popup, content script died) doesn't leak the entry forever and grow the
+// map under repeated dApp calls.
+const PENDING_TTL_MS = 5 * 60 * 1000;
+
 function send<T>(method: string, params?: unknown): Promise<T> {
   const id = randomId();
   return new Promise<T>((resolve, reject) => {
-    pending.set(id, { resolve, reject });
+    const timer = setTimeout(() => {
+      if (pending.delete(id)) reject(new Error('Wallet request timed out'));
+    }, PENDING_TTL_MS);
+    pending.set(id, {
+      resolve: (v: any) => { clearTimeout(timer); resolve(v); },
+      reject: (e: Error) => { clearTimeout(timer); reject(e); },
+    });
     window.postMessage({ kind: `${RPC_PREFIX}.request`, id, method, params }, window.location.origin);
   });
 }

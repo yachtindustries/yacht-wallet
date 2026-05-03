@@ -114,10 +114,17 @@ export default function TokenDetail() {
 
         {chartUrl && (
           <div className="card !p-0 overflow-hidden mb-3" style={{ height: 260 }}>
+            {/* SECURITY: sandbox the third-party iframe so a future
+                dexscreener compromise can't render fake "Approve" UI inside
+                the wallet. allow-scripts is needed for the chart to render;
+                allow-same-origin is intentionally OMITTED so the iframe
+                cannot read its top window or our extension storage. */}
             <iframe
               src={chartUrl}
               title={`${token.symbol} chart`}
               className="w-full h-full border-0"
+              sandbox="allow-scripts allow-popups"
+              referrerPolicy="no-referrer"
             />
           </div>
         )}

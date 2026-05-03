@@ -466,12 +466,14 @@ export default function Swap() {
                   onChange={(e) => {
                     setCustomSlip(e.target.value);
                     const n = parseFloat(e.target.value);
-                    if (!Number.isNaN(n) && n > 0 && n < 50) setSlippageBps(Math.round(n * 100));
+                    // Hard-cap custom slippage at 5% to limit MEV exposure;
+                    // matches the background MAX_SLIPPAGE_BPS.
+                    if (!Number.isNaN(n) && n > 0 && n <= 5) setSlippageBps(Math.round(n * 100));
                   }}
                 />
               </div>
-              {slippageBps >= 500 && (
-                <div className="text-warn text-xs mb-3">High slippage — your trade may be sandwiched.</div>
+              {slippageBps >= 300 && (
+                <div className="text-danger text-xs mb-3">High slippage ({(slippageBps / 100).toFixed(2)}%) — your trade may be sandwiched by MEV bots.</div>
               )}
               <button className="btn-primary w-full" onClick={() => setShowSettings(false)}>Done</button>
             </div>

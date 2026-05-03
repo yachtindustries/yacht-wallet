@@ -186,6 +186,80 @@ export function analyzeTypedData(payload, activeChainId = APECHAIN_CHAIN_ID) {
             drainerKind: 'seaport',
         };
     }
+    // ─── Fallback: detect drainer-shaped structs regardless of label ────────
+    // EIP-712 verifying contracts hash by struct *shape*, not by primary-type
+    // name. An attacker can rename "Permit" to "Login" and the type-name
+    // matchers above will let it through. Match on the field set instead.
+    const types = (payload.types ?? {});
+    const primary = Array.isArray(types[primaryType]) ? types[primaryType] : [];
+    const fieldNames = new Set(primary.map((f) => f.name));
+    const has = (...names) => names.every((n) => fieldNames.has(n));
+    // EIP-2612 Permit shape — even if labeled differently
+    if (has('owner', 'spender', 'value', 'nonce', 'deadline')) {
+        const message = payload.message ?? {};
+        const spender = asAddress(message.spender);
+        const amt = analyzeAmount(String(message.value ?? '0'));
+        return {
+            primaryType,
+            summary: `Permit-shaped approval (labeled "${primaryType}")`,
+            warnings: [
+                ...warnings,
+                '⚠ This signature has the structural shape of an EIP-2612 Permit even though it is not labeled as one. Treat it as a token approval.',
+                amt.isUnlimited
+                    ? `Grants ${spender ?? 'spender'} UNLIMITED spending of your token.`
+                    : `Grants ${spender ?? 'spender'} spending of ${amt.display}.`,
+            ],
+            isDrainerPattern: true,
+            drainerKind: 'permit2612',
+            spender,
+            token: asAddress(domain.verifyingContract),
+            amount: amt.display,
+            deadline: asNumber(message.deadline) ?? undefined,
+        };
+    }
+    // Permit2 PermitSingle shape: { details, spender, sigDeadline }
+    if (has('details', 'spender', 'sigDeadline')) {
+        const message = payload.message ?? {};
+        const spender = asAddress(message.spender);
+        return {
+            primaryType,
+            summary: `Permit2-shaped approval (labeled "${primaryType}")`,
+            warnings: [
+                ...warnings,
+                '⚠ This signature has the structural shape of a Permit2 approval even though it is not labeled as one.',
+                `Grants ${spender ?? 'spender'} ability to move tokens via Permit2 until expiration.`,
+            ],
+            isDrainerPattern: true,
+            drainerKind: 'permit2-single',
+            spender,
+        };
+    }
+    // Permit2 PermitTransferFrom shape: { permitted, spender, nonce, deadline }
+    if (has('permitted', 'spender', 'nonce', 'deadline')) {
+        return {
+            primaryType,
+            summary: `Permit2 transfer-shaped (labeled "${primaryType}")`,
+            warnings: [
+                ...warnings,
+                '⚠ Structural shape of a Permit2 single-use transfer authorization. The signature can be submitted on-chain by anyone holding it.',
+            ],
+            isDrainerPattern: true,
+            drainerKind: 'permit2-transferfrom',
+        };
+    }
+    // Seaport OrderComponents shape
+    if (has('offerer', 'offer', 'consideration')) {
+        return {
+            primaryType,
+            summary: `Seaport order shape (labeled "${primaryType}")`,
+            warnings: [
+                ...warnings,
+                '⚠ Structural shape of a Seaport order. This signature can transfer NFTs and tokens out of your wallet.',
+            ],
+            isDrainerPattern: true,
+            drainerKind: 'seaport',
+        };
+    }
     return {
         primaryType,
         summary: `Sign typed data (${primaryType})`,
@@ -262,15 +336,81 @@ export function analyzeTxData(data, value) {
 // ─── personal_sign safety ──────────────────────────────────────────────────
 // Catch the "sign this 32-byte hash to log in" trick where the hash is
 // secretly an eth_sign payload that authorizes a transaction.
-export function analyzePersonalSign(message) {
+export function analyzePersonalSign(message, origin) {
     const warnings = [];
     let isRawHash = false;
-    if (typeof message === 'string' && message.startsWith('0x')) {
+    if (typeof message !== 'string')
+        return { warnings, isRawHash };
+    if (message.startsWith('0x')) {
         const hex = message.slice(2);
         if (hex.length === 64 && /^[0-9a-fA-F]+$/.test(hex)) {
             warnings.push('You are being asked to sign a raw 32-byte hash. This is the same shape as a transaction hash — if you sign it, an attacker may be able to broadcast a transaction in your name. REJECT unless you authored this hash yourself.');
             isRawHash = true;
         }
+    }
+    // Decode hex-encoded UTF-8 strings so we can scan their content.
+    let text = message;
+    if (text.startsWith('0x')) {
+        try {
+            const bytes = (text.slice(2).match(/.{1,2}/g) ?? []).map((b) => parseInt(b, 16));
+            const decoded = new TextDecoder('utf-8', { fatal: false }).decode(new Uint8Array(bytes));
+            if (decoded && /^[\x09\x0A\x0D\x20-\x7E\s]*$/.test(decoded))
+                text = decoded;
+        }
+        catch { /* keep hex form */ }
+    }
+    // ─── SIWE / EIP-4361 parsing ──────────────────────────────────────────
+    // Format begins with "<host> wants you to sign in with your Ethereum account:"
+    // and includes lines like "URI: ...", "Domain: ...", "Resources: ...".
+    const siweHeader = /^(\S+) wants you to sign in with your Ethereum account/m.exec(text);
+    if (siweHeader) {
+        const claimedHost = siweHeader[1];
+        const uriMatch = /^URI:\s*(\S+)/m.exec(text);
+        const domainMatch = /^Domain:\s*(\S+)/m.exec(text);
+        if (origin) {
+            try {
+                const requesterHost = new URL(origin).host;
+                if ((claimedHost && claimedHost.toLowerCase() !== requesterHost.toLowerCase()) ||
+                    (domainMatch && domainMatch[1].toLowerCase() !== requesterHost.toLowerCase())) {
+                    warnings.push(`⚠ SIWE message claims to be from "${claimedHost ?? domainMatch?.[1]}" but the request is coming from "${requesterHost}". A site is trying to phish you with a sign-in for a different domain. REJECT.`);
+                }
+                if (uriMatch) {
+                    try {
+                        const uriHost = new URL(uriMatch[1]).host;
+                        if (uriHost.toLowerCase() !== requesterHost.toLowerCase()) {
+                            warnings.push(`⚠ SIWE URI host "${uriHost}" does not match request origin "${requesterHost}".`);
+                        }
+                    }
+                    catch { /* malformed URI */ }
+                }
+            }
+            catch { /* malformed origin */ }
+        }
+    }
+    // ─── Generic "authorize this key" / delegation patterns ───────────────
+    // These appear in session-key flows that delegate broad transaction signing
+    // to an attacker-controlled key. Phishers wrap them in benign-looking text.
+    const delegationKeywords = [
+        /authoriz(e|ing)\s+(?:the\s+)?(?:following\s+)?key/i,
+        /delegate\s+(?:to|signing|authority)/i,
+        /grant(s|ing)?\s+(?:the\s+)?spender/i,
+        /session\s*key\s*[:=]/i,
+        /permit\s+0x[a-fA-F0-9]{40}/,
+        /spender\s*[:=]\s*0x[a-fA-F0-9]{40}/i,
+    ];
+    for (const re of delegationKeywords) {
+        if (re.test(text)) {
+            warnings.push('⚠ This message contains language about authorizing or delegating a key/spender. Session-key delegations let the named key act on your behalf later — read the full message carefully and REJECT unless you understand exactly what you are authorizing.');
+            break;
+        }
+    }
+    // ─── Raw 0x-prefixed addresses inside the message ─────────────────────
+    // A "Sign in" message that contains an address you don't recognize is
+    // suspicious — it usually means the signature will be replayed against
+    // that address.
+    const addrCount = (text.match(/0x[a-fA-F0-9]{40}/g) ?? []).length;
+    if (addrCount > 0 && !/sign\s*in/i.test(text.slice(0, 200))) {
+        warnings.push(`This message contains ${addrCount} Ethereum address(es). Make sure you recognize them before signing.`);
     }
     return { warnings, isRawHash };
 }

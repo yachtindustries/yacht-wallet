@@ -43,6 +43,8 @@ export default function Unlock() {
             className="w-full max-w-xs rounded-xl px-3 py-3 text-center font-bold bg-white text-ink placeholder:text-ink-faint border border-white focus:outline-none focus:ring-2 focus:ring-white"
             style={{ fontSize: 17 }}
             type="password"
+            autoComplete="current-password"
+            spellCheck={false}
             value={pw}
             onChange={(e) => setPw(e.target.value)}
             placeholder="Password"

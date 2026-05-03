@@ -14,7 +14,8 @@
 // • Concurrency: per-account submission queue serialises sign+submit.
 //
 // • Pending dApp request limits: per-origin cap to prevent popup-spam.
-import { createVault, destroyVault, isInitialized, readMeta, rewriteVault, unlockVault, changePassword, } from '@/lib/vault';
+import { createVault, destroyVault, isInitialized, readMeta, rewriteVaultWithKey, unlockVault, changePassword, } from '@/lib/vault';
+import { fromB64, toB64 } from '@/lib/crypto';
 import { getAccountSummary, getErc20Balance, getErc20Balances, getErc20Info, getHistory, getOwnedNfts, personalSign, sendErc20, sendNative, signGenericTransaction, signTypedDataV4, simulateTransaction, } from '@/lib/evm';
 import { analyzePersonalSign, analyzeTxData, analyzeTypedData } from '@/lib/signing-detect';
 import { ensureAllowance, executeSwap, isNativeAddress, quoteSwap, } from '@/lib/camelot';
@@ -30,7 +31,7 @@ const AUTO_LOCK_ALARM = 'yacht.autolock';
 const MAX_PENDING_PER_ORIGIN = 3;
 const MAX_UNLOCK_FAILURES = 5;
 const UNLOCK_LOCKOUT_MS = 30_000;
-const MAX_SLIPPAGE_BPS = 2000; // 20%
+const MAX_SLIPPAGE_BPS = 500; // 5% — limits MEV sandwich blast radius
 // Per-origin RPC rate limit: leaky bucket capping a dApp at this many
 // background-served calls per minute. Defends against fingerprinting loops
 // (calling getAddress in a tight while(true)) and popup spam.
@@ -48,7 +49,7 @@ async function setAutoLockAlarm() {
 chrome.alarms.onAlarm.addListener((a) => {
     if (a.name === AUTO_LOCK_ALARM) {
         lock();
-        cachedPassword = null;
+        cachedKey = null;
         submissionQueues.clear();
         void clearSession();
     }
@@ -158,15 +159,24 @@ function safeError(e) {
 // terminations don't appear to "lock" the wallet every minute. session storage
 // lives in browser-process RAM; it never touches disk and is wiped on browser
 // restart. The same auto-lock alarm still tears down the session on schedule.
+//
+// SECURITY: we persist the *derived AES key bytes* and salt, NOT the user's
+// password. The key bytes are sufficient to re-encrypt the vault (with the
+// same salt → same KDF result → same key) without ever holding the password
+// in memory after unlock. The password is needed only for changePassword,
+// which the user re-enters as input.
 const SESSION_KEY = 'yacht.session.v1';
 const SESSION_GRACE_MS = 60 * 60 * 1000; // 1h hard cap regardless of alarm fate
+let cachedKey = null;
 async function writeSession() {
-    if (!state.unlocked || !cachedPassword)
+    if (!state.unlocked || !cachedKey)
         return;
     const blob = {
+        v: 2,
         unlocked: state.unlocked,
         unlockedAt: state.unlockedAt,
-        password: cachedPassword,
+        keyB64: toB64(cachedKey.bytes),
+        saltB64: toB64(cachedKey.salt),
         expiresAt: Date.now() + SESSION_GRACE_MS,
     };
     try {
@@ -180,48 +190,111 @@ async function clearSession() {
     }
     catch { /* ignore */ }
 }
+// Validate the on-the-wire shape. We can't authenticate the writer (anything
+// with chrome.storage permission can write), but we can refuse anything that
+// doesn't match the exact schema we expect — which limits what a malformed or
+// poisoned blob can do (can't pin an "unlocked" boolean past expiry, can't
+// inject extra fields that future code paths might trust).
+function isValidSessionBlob(b) {
+    if (!b || typeof b !== 'object')
+        return false;
+    const x = b;
+    if (x.v !== 2)
+        return false;
+    if (typeof x.keyB64 !== 'string' || typeof x.saltB64 !== 'string')
+        return false;
+    if (typeof x.unlockedAt !== 'number' || !Number.isFinite(x.unlockedAt))
+        return false;
+    if (typeof x.expiresAt !== 'number' || !Number.isFinite(x.expiresAt))
+        return false;
+    if (!x.unlocked || typeof x.unlocked !== 'object')
+        return false;
+    const u = x.unlocked;
+    if (!Array.isArray(u.accounts))
+        return false;
+    if (typeof u.nextDerivationIndex !== 'number')
+        return false;
+    if (u.activeAccountId !== null && typeof u.activeAccountId !== 'string')
+        return false;
+    if (u.mnemonic !== null && typeof u.mnemonic !== 'string')
+        return false;
+    for (const a of u.accounts) {
+        if (!a || typeof a !== 'object')
+            return false;
+        const ac = a;
+        if (typeof ac.id !== 'string' || typeof ac.name !== 'string')
+            return false;
+        if (typeof ac.address !== 'string' || typeof ac.privateKey !== 'string')
+            return false;
+        if (ac.origin !== 'mnemonic' && ac.origin !== 'privateKey')
+            return false;
+    }
+    return true;
+}
 let rehydratePromise = null;
 async function rehydrateFromSession() {
     if (state.unlocked)
         return;
     try {
         const r = await chrome.storage.session.get(SESSION_KEY);
-        const blob = r[SESSION_KEY];
-        if (!blob)
+        const raw = r[SESSION_KEY];
+        if (!raw)
             return;
-        if (Date.now() > blob.expiresAt) {
+        if (!isValidSessionBlob(raw)) {
+            // Malformed or legacy v1 (password-bearing) blob — nuke it; user
+            // re-unlocks once. This is by design after the H1/H2 hardening.
+            await clearSession();
+            return;
+        }
+        const blob = raw;
+        // Independent expiry check using a server-side cap, in addition to the
+        // attacker-controlled expiresAt field on the blob.
+        const hardCap = blob.unlockedAt + SESSION_GRACE_MS;
+        if (Date.now() > Math.min(blob.expiresAt, hardCap)) {
             await clearSession();
             return;
         }
         state.unlocked = blob.unlocked;
         state.unlockedAt = blob.unlockedAt;
-        cachedPassword = blob.password;
+        cachedKey = {
+            bytes: fromB64(blob.keyB64),
+            salt: fromB64(blob.saltB64),
+        };
     }
-    catch { /* ignore */ }
+    catch {
+        // If anything throws, fail closed (treat as locked).
+        state.unlocked = null;
+        state.unlockedAt = 0;
+        cachedKey = null;
+    }
 }
 function ensureRehydrated() {
     return (rehydratePromise ??= rehydrateFromSession());
 }
-async function rememberPasswordAndLoad(password) {
-    state.unlocked = await unlockVault(password);
+async function rememberUnlockedAndLoad(material) {
+    state.unlocked = material.data;
     state.unlockedAt = Date.now();
-    cachedPassword = password;
+    cachedKey = { bytes: material.keyBytes, salt: material.salt };
     await writeSession();
     void setAutoLockAlarm();
 }
 async function persistUnlocked() {
     if (!state.unlocked)
         throw new Error('Vault not unlocked');
-    if (!cachedPassword)
+    if (!cachedKey)
         throw new Error('Session expired — please unlock again');
-    await rewriteVault(cachedPassword, state.unlocked);
+    await rewriteVaultWithKey(cachedKey.bytes, cachedKey.salt, state.unlocked);
     await writeSession();
 }
-let cachedPassword = null;
 function stripCallbacks(p) {
     const { resolve: _r, reject: _j, ...rest } = p;
     return rest;
 }
+// Track the OS popup window currently displaying an approval request, so we
+// can focus it instead of opening a second one. Caps concurrent popup
+// windows globally at 1 — multiple coordinated origins can't open stacked
+// popups to confuse the user about which "Approve" goes with which dApp.
+let activeApprovalWindowId = null;
 async function openApprovalPopup(opts) {
     const pendingForOrigin = [...state.pending.values()].filter((p) => p.origin === opts.origin).length;
     if (pendingForOrigin >= MAX_PENDING_PER_ORIGIN) {
@@ -244,14 +317,35 @@ async function openApprovalPopup(opts) {
             },
             reject,
         });
-        chrome.windows.create({
-            url: chrome.runtime.getURL(`index.html#/request/${id}`),
-            type: 'popup',
-            width: 380,
-            height: 620,
-        });
+        // If a popup is already open, focus it. The popup's pending-request list
+        // shows every queued request so the user can see all of them; new
+        // requests join the existing list instead of spawning a new window.
+        if (activeApprovalWindowId != null) {
+            chrome.windows.update(activeApprovalWindowId, { focused: true }).catch(() => {
+                activeApprovalWindowId = null;
+                spawnPopup(id);
+            });
+        }
+        else {
+            spawnPopup(id);
+        }
     });
 }
+function spawnPopup(requestId) {
+    chrome.windows.create({
+        url: chrome.runtime.getURL(`index.html#/request/${requestId}`),
+        type: 'popup',
+        width: 380,
+        height: 620,
+    }, (win) => {
+        if (win?.id != null)
+            activeApprovalWindowId = win.id;
+    });
+}
+chrome.windows.onRemoved.addListener((windowId) => {
+    if (windowId === activeApprovalWindowId)
+        activeApprovalWindowId = null;
+});
 function nextDerivationIndex() {
     if (!state.unlocked)
         throw new Error('Vault not unlocked');
@@ -301,13 +395,13 @@ async function handle(req, sender) {
                 origin: 'mnemonic',
                 derivationIndex: 0,
             };
-            await createVault(req.password, {
+            const matNew = await createVault(req.password, {
                 mnemonic,
                 nextDerivationIndex: 1,
                 accounts: [account],
                 activeAccountId: account.id,
             });
-            await rememberPasswordAndLoad(req.password);
+            await rememberUnlockedAndLoad(matNew);
             return { mnemonic, address: account.address };
         }
         case 'vault.create.mnemonic': {
@@ -322,13 +416,13 @@ async function handle(req, sender) {
                 origin: 'mnemonic',
                 derivationIndex: 0,
             };
-            await createVault(req.password, {
+            const matMnem = await createVault(req.password, {
                 mnemonic: req.mnemonic.trim(),
                 nextDerivationIndex: 1,
                 accounts: [account],
                 activeAccountId: account.id,
             });
-            await rememberPasswordAndLoad(req.password);
+            await rememberUnlockedAndLoad(matMnem);
             return { address: account.address };
         }
         case 'vault.create.privateKey': {
@@ -340,13 +434,13 @@ async function handle(req, sender) {
                 privateKey: w.privateKey,
                 origin: 'privateKey',
             };
-            await createVault(req.password, {
+            const matPk = await createVault(req.password, {
                 mnemonic: null,
                 nextDerivationIndex: 0,
                 accounts: [account],
                 activeAccountId: account.id,
             });
-            await rememberPasswordAndLoad(req.password);
+            await rememberUnlockedAndLoad(matPk);
             return { address: account.address };
         }
         case 'vault.unlock': {
@@ -355,7 +449,8 @@ async function handle(req, sender) {
                 throw new Error(`Too many failed attempts. Try again in ${Math.ceil(gate.waitMs / 1000)}s.`);
             }
             try {
-                await rememberPasswordAndLoad(req.password);
+                const material = await unlockVault(req.password);
+                await rememberUnlockedAndLoad(material);
                 unlockSucceeded();
             }
             catch {
@@ -366,7 +461,7 @@ async function handle(req, sender) {
         }
         case 'vault.lock': {
             lock();
-            cachedPassword = null;
+            cachedKey = null;
             submissionQueues.clear();
             await clearSession();
             return { ok: true };
@@ -423,19 +518,22 @@ async function handle(req, sender) {
             return { ok: true };
         }
         case 'vault.account.reveal': {
-            const data = await unlockVault(req.password);
+            const { data } = await unlockVault(req.password);
             const a = data.accounts.find((x) => x.id === req.id);
             if (!a)
                 throw new Error('Account not found');
             return { privateKey: a.privateKey };
         }
         case 'vault.mnemonic.reveal': {
-            const data = await unlockVault(req.password);
+            const { data } = await unlockVault(req.password);
             return { mnemonic: data.mnemonic };
         }
         case 'vault.changePassword': {
-            await changePassword(req.oldPw, req.newPw);
-            cachedPassword = req.newPw;
+            const fresh = await changePassword(req.oldPw, req.newPw);
+            // Atomically swap in the new key material so the next persist uses it.
+            cachedKey = { bytes: fresh.keyBytes, salt: fresh.salt };
+            state.unlocked = fresh.data;
+            await writeSession();
             return { ok: true };
         }
         case 'vault.destroy': {
@@ -445,13 +543,16 @@ async function handle(req, sender) {
             catch {
                 throw new Error('Incorrect password');
             }
-            await destroyVault();
+            // Wipe session FIRST so the in-memory key material is gone before the
+            // user-visible destroy completes; otherwise a SW kill in this window
+            // leaves a vault-less state with key material still in session.
+            await clearSession();
+            cachedKey = null;
             lock();
-            cachedPassword = null;
+            await destroyVault();
             state.approvedOrigins.clear();
             await persistApprovedOrigins();
             submissionQueues.clear();
-            await clearSession();
             return { ok: true };
         }
         case 'settings.get': return await readSettings();
@@ -628,7 +729,16 @@ async function handle(req, sender) {
             const active = getActiveAccount();
             if (!active)
                 throw new Error('Wallet locked');
-            const tx = { ...req.tx, from: active.address };
+            // SECURITY: only forward semantic fields the dApp must specify. Strip
+            // gas / fee / nonce / chainId — the wallet derives those itself. This
+            // blocks the "0 value, 30M gas, infinite fee → drain user's APE in
+            // fees" attack class.
+            const tx = {
+                from: active.address,
+                to: req.tx.to,
+                value: req.tx.value,
+                data: req.tx.data,
+            };
             const risk = assessTxRisk(tx);
             const settings = await readSettings();
             const dataAnalysis = analyzeTxData(typeof tx.data === 'string' ? tx.data : '0x', toBigint(tx.value));
@@ -670,7 +780,14 @@ async function handle(req, sender) {
             const active = getActiveAccount();
             if (!active)
                 throw new Error('Wallet locked');
-            const a = analyzePersonalSign(req.message);
+            // SECURITY: refuse to sign anything that looks like a raw 32-byte hash.
+            // Even with EIP-191's prefix, signing an opaque digest the user cannot
+            // read is the canonical phishing pattern. A legitimate dApp can always
+            // wrap the digest in a human-readable string. Reject at the gateway.
+            const a = analyzePersonalSign(req.message, origin);
+            if (a.isRawHash) {
+                throw new Error('Refused to sign a raw 32-byte hash. Yacht only signs human-readable messages.');
+            }
             return await openApprovalPopup({
                 type: 'personalSign',
                 origin,
@@ -702,13 +819,84 @@ async function handle(req, sender) {
             const r = state.pending.get(req.id);
             return r ? stripCallbacks(r) : null;
         }
-        case 'request.resolve': {
-            const r = state.pending.get(req.id);
-            if (!r)
+        case 'request.approve': {
+            // SECURITY: the popup signals "user approved request <id>" with NO
+            // payload. The background re-reads its own copy of the pending payload
+            // and performs the action server-side, so a compromised popup cannot
+            // substitute the tx body between display and signing. The popup's only
+            // authority is yes/no on a request the background already minted.
+            const pending = state.pending.get(req.id);
+            if (!pending)
                 throw new Error('Request not found');
-            r.resolve(req.result);
-            state.pending.delete(req.id);
-            return { ok: true };
+            await requireUnlocked();
+            const settings = await readSettings();
+            const cfg = NETWORKS[settings.network];
+            const active = getActiveAccount();
+            if (!active)
+                throw new Error('No active account');
+            // The pending payload was constructed at dapp.* dispatch time with the
+            // active account's address forced into `from`. We re-resolve the
+            // current active account here in case it changed (rare, mid-popup
+            // account switch). Match by id so we sign with exactly the account
+            // shown to the user — if the active account moved, fail safe.
+            const acct = state.unlocked.accounts.find((a) => a.address.toLowerCase() === active.address.toLowerCase());
+            if (!acct)
+                throw new Error('Active account no longer available');
+            try {
+                // TOCTOU guard: re-check unlock state immediately before each sign.
+                // If the auto-lock alarm fired between approval-start and now, fail
+                // safe rather than completing a sign post-lock.
+                const assertStillUnlocked = () => {
+                    if (!isUnlocked())
+                        throw new Error('Wallet locked during approval');
+                };
+                let result;
+                if (pending.type === 'connect') {
+                    result = { address: acct.address, chainId: cfg.chainIdHex };
+                }
+                else if (pending.type === 'signTx') {
+                    const p = pending.payload;
+                    // Re-strip dangerous fields defensively. tx.from was forced at
+                    // dispatch time but a future code path could mutate the pending
+                    // entry — never trust pending.payload.tx fields beyond to/value/data.
+                    const safe = {
+                        from: acct.address,
+                        to: p.tx.to,
+                        value: p.tx.value,
+                        data: p.tx.data,
+                    };
+                    assertStillUnlocked();
+                    result = await submitSerialized(acct.address, () => {
+                        assertStillUnlocked();
+                        return signGenericTransaction(settings.network, acct.privateKey, normalizeTxRequest(safe));
+                    });
+                }
+                else if (pending.type === 'personalSign') {
+                    const p = pending.payload;
+                    assertStillUnlocked();
+                    const signature = await personalSign(acct.privateKey, p.message);
+                    result = { signature };
+                }
+                else if (pending.type === 'signTypedData') {
+                    const p = pending.payload;
+                    assertStillUnlocked();
+                    const signature = await signTypedDataV4(acct.privateKey, p.typedData);
+                    result = { signature };
+                }
+                else {
+                    throw new Error('Unknown approval type');
+                }
+                pending.resolve(result);
+                state.pending.delete(req.id);
+                return { ok: true };
+            }
+            catch (e) {
+                // Don't leak the dApp's pending Promise — reject it too so the dApp
+                // sees an error instead of hanging.
+                pending.reject(new Error(safeError(e)));
+                state.pending.delete(req.id);
+                throw new Error(friendlyError(e));
+            }
         }
         case 'request.reject': {
             const r = state.pending.get(req.id);

@@ -76,7 +76,7 @@ export type RpcRequest =
   | { type: 'dapp.personalSign'; message: string }
   | { type: 'dapp.signTypedData'; payload: TypedDataPayload }
   // popup → background:
-  | { type: 'request.resolve'; id: string; result: unknown }
+  | { type: 'request.approve'; id: string }
   | { type: 'request.reject'; id: string; error: string }
   | { type: 'request.list' }
   | { type: 'request.get'; id: string }
@@ -122,7 +122,7 @@ export interface RpcResponseMap {
   'dapp.signTx': SendResult;
   'dapp.personalSign': { signature: string };
   'dapp.signTypedData': { signature: string };
-  'request.resolve': { ok: true };
+  'request.approve': { ok: true };
   'request.reject': { ok: true };
   'request.list': PendingRequest[];
   'request.get': PendingRequest | null;

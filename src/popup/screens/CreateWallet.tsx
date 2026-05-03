@@ -65,6 +65,8 @@ export default function CreateWallet() {
           <input
             className="input mb-4"
             type="password"
+            autoComplete="new-password"
+            spellCheck={false}
             value={pw2}
             onChange={(e) => setPw2(e.target.value)}
           />

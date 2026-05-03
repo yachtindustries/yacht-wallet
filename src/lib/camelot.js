@@ -10,7 +10,7 @@
 //   Router V2:  0x18E621B64d7808c3C47bccbbD7485d23F257D26f
 //   Factory V2: 0x7d8c6B58BA2d40FC6E34C25f9A488067Fe0D2dB4
 //   WAPE:       0x48b62137EdfA95a428D35C09E44256a739F6B557
-import { Contract, Interface, MaxUint256, ZeroAddress, Wallet, formatUnits, parseUnits, } from 'ethers';
+import { Contract, Interface, ZeroAddress, Wallet, formatUnits, parseUnits, } from 'ethers';
 import { NETWORKS } from './networks';
 import { getProvider } from './evm';
 export const CAMELOT_V2_ROUTER = '0x18E621B64d7808c3C47bccbbD7485d23F257D26f';
@@ -112,7 +112,7 @@ export async function quoteSwap(req) {
     };
 }
 const MAX_GAS_PRICE_GWEI = 500n;
-async function buildOverrides(provider, base) {
+async function buildOverrides(provider, base, fromAddress) {
     const fee = await provider.getFeeData();
     const overrides = { ...base };
     if (fee.maxFeePerGas && fee.maxPriorityFeePerGas) {
@@ -130,9 +130,22 @@ async function buildOverrides(provider, base) {
             throw new Error(`Network gas price too high (${k} > ${MAX_GAS_PRICE_GWEI} gwei)`);
         }
     }
+    // 'pending' nonce so back-to-back queued sends don't collide on nonce.
+    if (overrides.nonce == null) {
+        overrides.nonce = await provider.getTransactionCount(fromAddress, 'pending');
+    }
     return overrides;
 }
-/** Ensure the router has at least `amount` allowance for tokenIn. Sends an approve tx if not. */
+/**
+ * Ensure the router has at least `amount` allowance for tokenIn. Sends an
+ * approve tx if not.
+ *
+ * SECURITY: we approve `amount × 1.5` (rounded up to absorb any rounding /
+ * fee-on-transfer slack), NOT `MaxUint256`. Unlimited approvals are the
+ * #1 wallet-drainer vector — if the router is ever exploited, every user who
+ * granted unlimited approval is drained simultaneously. Bounded approvals
+ * mean each swap re-approves just what it needs.
+ */
 export async function ensureAllowance(network, privateKey, token, amount) {
     if (isNativeAddress(token))
         return null;
@@ -140,10 +153,12 @@ export async function ensureAllowance(network, privateKey, token, amount) {
     const wallet = new Wallet(privateKey, provider);
     const erc20 = new Contract(token, ERC20_ABI, wallet);
     const current = await erc20.allowance(wallet.address, CAMELOT_V2_ROUTER);
-    if (current >= amount)
+    // 1.5x to allow for rounding / fee-on-transfer skim. Still bounded.
+    const desired = (amount * 3n) / 2n;
+    if (current >= desired)
         return null;
-    const overrides = await buildOverrides(provider, {});
-    const tx = await erc20.approve(CAMELOT_V2_ROUTER, MaxUint256, overrides);
+    const overrides = await buildOverrides(provider, {}, wallet.address);
+    const tx = await erc20.approve(CAMELOT_V2_ROUTER, desired, overrides);
     const receipt = await tx.wait();
     if (!receipt)
         throw new Error('Approval dropped from mempool');
@@ -191,7 +206,7 @@ export async function executeSwap(params) {
         // Both sides native — caller error
         throw new Error('Cannot swap APE for APE');
     }
-    const overrides = await buildOverrides(provider, { to: CAMELOT_V2_ROUTER, data: txData, value });
+    const overrides = await buildOverrides(provider, { to: CAMELOT_V2_ROUTER, data: txData, value }, wallet.address);
     // Estimate gas; pad 25% — Camelot's FoT path can vary.
     try {
         const est = await provider.estimateGas({ from: wallet.address, ...overrides });
