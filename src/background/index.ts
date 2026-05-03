@@ -364,10 +364,14 @@ async function openApprovalPopup(opts: {
       origin: opts.origin,
       createdAt: Date.now(),
       payload: opts.payload,
-      resolve: (v) => {
+      resolve: async (v) => {
         if (opts.type === 'connect') {
           state.approvedOrigins.add(opts.origin);
-          void persistApprovedOrigins();
+          // Await the persist BEFORE resolving the dApp's pending Promise.
+          // This closes the race where the dApp's follow-up call (e.g. SIWE
+          // personal_sign) reads from disk faster than we wrote, and finds
+          // the origin missing → "Origin not connected" → SIWE 401.
+          try { await persistApprovedOrigins(); } catch { /* best effort */ }
         }
         resolve(v);
       },

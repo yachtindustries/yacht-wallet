@@ -10,7 +10,13 @@ const APPROVED_KEY = 'yacht.origins.v1';
 export async function loadApprovedOrigins() {
     const r = await chrome.storage.local.get(APPROVED_KEY);
     const list = r[APPROVED_KEY] ?? [];
-    state.approvedOrigins = new Set(list);
+    // MERGE rather than replace, so we don't clobber an in-memory add whose
+    // persist is still in flight (e.g. dapp.connect just approved, and the
+    // dApp's follow-up personal_sign races us to read state). Revocations are
+    // handled by origins.revoke which mutates the in-memory set first, then
+    // persists — so the on-disk view never has more than the in-memory view.
+    for (const o of list)
+        state.approvedOrigins.add(o);
 }
 export async function persistApprovedOrigins() {
     await chrome.storage.local.set({ [APPROVED_KEY]: [...state.approvedOrigins] });
