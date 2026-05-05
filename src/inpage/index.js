@@ -73,7 +73,7 @@ const provider = {
     info: {
         name: 'Yacht',
         uuid: '8a4f4bbf-3a7b-4d6e-9e57-8f71e4a8f1c2',
-        icon: 'data:image/svg+xml;base64,',
+        icon: 'data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNTYgMjU2Ij48cmVjdCB3aWR0aD0iMjU2IiBoZWlnaHQ9IjI1NiIgcng9IjQ4IiBmaWxsPSIjZjZjODdlIi8+PHBhdGggZD0iTTQ4IDE2OCBMMjA4IDE2OCBRMjIwIDE2OCAyMTggMTU2IEwyMTAgMTQ0IEw0NiAxNDQgUTM0IDE0NCAzOCAxNTYgWiIgZmlsbD0iI2ZmZiIvPjxwYXRoIGQ9Ik03MCAxNDQgTDcwIDExMCBRNzAgOTYgODQgOTYgTDE1MCA5NiBRMTU4IDk2IDE2MiAxMDIgTDE4NCAxMzAgUTE4OCAxMzggMTc4IDE0NCBaIiBmaWxsPSIjZmZmIi8+PHBhdGggZD0iTTg2IDEyNCBMODYgMTEwIEwxMzAgMTEwIEwxMzAgMTI0IFoiIGZpbGw9IiNmNmM4N2UiLz48L3N2Zz4=',
         rdns: 'app.yacht',
     },
     request: async ({ method, params }) => {

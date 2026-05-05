@@ -15,14 +15,73 @@ const ERC20_ABI = [
 ];
 const erc20Iface = new Interface(ERC20_ABI);
 const providers = new Map();
+// Errors that should trigger failover to the next RPC URL. We only fall over
+// on transport-layer failure (the upstream is unreachable, hung, or 5xx) — not
+// on application-layer JSON-RPC errors like "execution reverted" or "nonce too
+// low", which are deterministic answers and would just be returned by every
+// upstream identically.
+function isTransportFailure(e) {
+    const code = e?.code;
+    if (code === 'NETWORK_ERROR' || code === 'TIMEOUT' || code === 'SERVER_ERROR')
+        return true;
+    // ethers wraps fetch errors with .info.error.message; look for HTTP 5xx.
+    const status = e?.info?.status;
+    if (typeof status === 'number' && status >= 500)
+        return true;
+    return false;
+}
 export function getProvider(network) {
     let p = providers.get(network);
     if (!p) {
-        const cfg = NETWORKS[network];
-        p = new JsonRpcProvider(cfg.rpcUrl, { chainId: cfg.chainId, name: cfg.label }, { staticNetwork: true });
+        p = createFailoverProvider(network);
         providers.set(network, p);
     }
     return p;
+}
+function createFailoverProvider(network) {
+    const cfg = NETWORKS[network];
+    const urls = cfg.rpcUrls;
+    if (urls.length === 0)
+        throw new Error(`No RPC URLs configured for ${network}`);
+    const net = { chainId: cfg.chainId, name: cfg.label };
+    const opts = { staticNetwork: true };
+    const primary = new JsonRpcProvider(urls[0], net, opts);
+    if (urls.length === 1)
+        return primary;
+    // Lazy: only construct fallbacks if we ever fail over to them.
+    const fallbacks = [];
+    const ensureFallback = (i) => {
+        if (!fallbacks[i])
+            fallbacks[i] = new JsonRpcProvider(urls[i + 1], net, opts);
+        return fallbacks[i];
+    };
+    // Override `send` — every JsonRpcApiProvider operation funnels through this
+    // method (getBalance, call, estimateGas, getLogs, etc.), so wrapping it here
+    // gives failover for the entire ethers surface plus our own dappRpc().
+    const originalSend = primary.send.bind(primary);
+    primary.send = async (method, params) => {
+        let lastErr;
+        try {
+            return await originalSend(method, params);
+        }
+        catch (e) {
+            if (!isTransportFailure(e))
+                throw e;
+            lastErr = e;
+        }
+        for (let i = 0; i < urls.length - 1; i++) {
+            try {
+                return await ensureFallback(i).send(method, params);
+            }
+            catch (e) {
+                if (!isTransportFailure(e))
+                    throw e;
+                lastErr = e;
+            }
+        }
+        throw lastErr;
+    };
+    return primary;
 }
 export async function getAccountSummary(network, address) {
     const p = getProvider(network);
@@ -215,6 +274,10 @@ const ERC721_ABI = [
     'function ownerOf(uint256) view returns (address)',
 ];
 const erc721Iface = new Interface(ERC721_ABI);
+// ERC-1155 uses `uri(uint256)` instead of `tokenURI`. Tried as a fallback
+// when tokenURI doesn't exist or reverts (most ApeChain 1155 contracts).
+const ERC1155_ABI = ['function uri(uint256) view returns (string)'];
+const erc1155Iface = new Interface(ERC1155_ABI);
 // Pool of public IPFS gateways. We rotate per-request so a single gateway
 // compromise / outage doesn't take down all NFT loading, and so no single
 // gateway sees every Yacht user's NFT browsing.
@@ -292,15 +355,64 @@ function isSafeMetadataUrl(url) {
     }
     return true;
 }
-async function fetchNftMetadata(network, contract, tokenId) {
+/** Substitute the standard ERC-1155 {id} placeholder with the 64-hex-pad tokenId. */
+function substituteIdPlaceholder(uri, tokenId) {
+    if (!uri.includes('{id}'))
+        return uri;
+    let hex;
     try {
-        const p = getProvider(network);
+        hex = BigInt(tokenId).toString(16).padStart(64, '0');
+    }
+    catch {
+        hex = tokenId;
+    }
+    return uri.replace(/\{id\}/g, hex);
+}
+async function readTokenUri(network, contract, tokenId) {
+    const p = getProvider(network);
+    // Try ERC-721 tokenURI first. Many ApeChain NFTs are 721; cheap call.
+    try {
         const data = erc721Iface.encodeFunctionData('tokenURI', [tokenId]);
         const raw = await p.call({ to: contract, data });
-        if (!raw || raw === '0x')
-            return {};
-        const decoded = erc721Iface.decodeFunctionResult('tokenURI', raw);
-        const uri = (decoded[0] ?? '');
+        if (raw && raw !== '0x') {
+            const decoded = erc721Iface.decodeFunctionResult('tokenURI', raw);
+            const uri = (decoded[0] ?? '');
+            if (uri)
+                return uri;
+        }
+    }
+    catch { /* fall through to ERC-1155 */ }
+    // ERC-1155 uri(uint256). Returned URI may contain {id} placeholder.
+    try {
+        const data = erc1155Iface.encodeFunctionData('uri', [tokenId]);
+        const raw = await p.call({ to: contract, data });
+        if (raw && raw !== '0x') {
+            const decoded = erc1155Iface.decodeFunctionResult('uri', raw);
+            const uri = (decoded[0] ?? '');
+            if (uri)
+                return substituteIdPlaceholder(uri, tokenId);
+        }
+    }
+    catch { /* both failed */ }
+    return null;
+}
+/** fetch with an aborting timeout. Hung gateways used to block all NFT loads. */
+async function fetchWithTimeout(url, ms = 6000) {
+    const ctl = new AbortController();
+    const t = setTimeout(() => ctl.abort(), ms);
+    try {
+        return await fetch(url, { signal: ctl.signal });
+    }
+    catch {
+        return null;
+    }
+    finally {
+        clearTimeout(t);
+    }
+}
+async function fetchNftMetadata(network, contract, tokenId) {
+    try {
+        const uri = await readTokenUri(network, contract, tokenId);
         if (!uri)
             return {};
         const url = ipfsToHttp(uri);
@@ -312,7 +424,6 @@ async function fetchNftMetadata(network, contract, tokenId) {
             const payload = isB64 ? atob(url.slice(comma + 1)) : decodeURIComponent(url.slice(comma + 1));
             const json = JSON.parse(payload);
             const imageUrl = json.image ? ipfsToHttp(json.image) : undefined;
-            // Guard the image URL the same way before returning it for <img> use.
             return {
                 image: imageUrl && isSafeMetadataUrl(imageUrl) ? imageUrl : undefined,
                 name: typeof json.name === 'string' ? json.name : undefined,
@@ -320,8 +431,8 @@ async function fetchNftMetadata(network, contract, tokenId) {
         }
         if (!isSafeMetadataUrl(url))
             return {};
-        const r = await fetch(url);
-        if (!r.ok)
+        const r = await fetchWithTimeout(url);
+        if (!r || !r.ok)
             return {};
         const meta = await r.json();
         const imageUrl = meta?.image ? ipfsToHttp(meta.image) : undefined;
@@ -336,17 +447,20 @@ async function fetchNftMetadata(network, contract, tokenId) {
 }
 export async function getOwnedNfts(network, address, withMetadata = true) {
     const lower = address.toLowerCase();
-    // Pull a sizeable window of ERC-721 transfers; Etherscan caps at 10k.
-    const transfers = await explorerCall(network, {
-        module: 'account',
-        action: 'tokennfttx',
-        address,
-        startblock: '0',
-        endblock: '99999999',
-        page: '1',
-        offset: '1000',
-        sort: 'desc',
-    });
+    // Pull both ERC-721 (tokennfttx) and ERC-1155 (token1155tx) transfer windows
+    // and merge — many ApeChain NFTs are 1155, and the 721-only query was
+    // missing them entirely. Etherscan caps the offset at 10k per call.
+    const [erc721, erc1155] = await Promise.all([
+        explorerCall(network, {
+            module: 'account', action: 'tokennfttx', address,
+            startblock: '0', endblock: '99999999', page: '1', offset: '1000', sort: 'desc',
+        }),
+        explorerCall(network, {
+            module: 'account', action: 'token1155tx', address,
+            startblock: '0', endblock: '99999999', page: '1', offset: '1000', sort: 'desc',
+        }).catch(() => []),
+    ]);
+    const transfers = [...erc721, ...erc1155];
     // Walk newest → oldest. The first time we see a (contract, tokenId) pair,
     // the latest direction tells us if WE currently hold it.
     const seen = new Set();
@@ -372,15 +486,25 @@ export async function getOwnedNfts(network, address, withMetadata = true) {
     if (!withMetadata)
         return owned;
     // Fetch metadata in parallel with a hard cap so we don't hammer providers.
+    // Wrap each one in an outer 8s budget so a hung gateway / unresponsive
+    // contract doesn't block the whole NFT load and leave the UI on
+    // "Loading NFTs…" forever.
     const cap = Math.min(owned.length, 60);
     await Promise.all(owned.slice(0, cap).map(async (n) => {
-        const meta = await fetchNftMetadata(network, n.contract, n.tokenId);
+        const meta = await Promise.race([
+            fetchNftMetadata(network, n.contract, n.tokenId),
+            new Promise((res) => setTimeout(() => res({}), 8000)),
+        ]);
         n.image = meta.image;
         n.name = meta.name;
     }));
     return owned;
 }
-const MAX_GAS_LIMIT = 1500000n; // sanity cap for non-contract sends
+// Sanity cap on per-tx gas. Needs to be high enough to cover dApp-side
+// operations like Camelot add-liquidity, NFT mints with reveal logic, and
+// multi-step DeFi flows that legitimately consume several million gas.
+// At ApeChain's gas prices (~0.5 gwei) the worst-case fee is still <0.01 APE.
+const MAX_GAS_LIMIT = 12000000n;
 const MAX_GAS_PRICE_GWEI = 500n; // refuse a runaway gasPrice
 async function buildOverrides(provider, request, fromAddress) {
     const fee = await provider.getFeeData();
@@ -494,6 +618,120 @@ export async function signTypedDataV4(privateKey, typedData) {
     // ethers.signTypedData rejects an EIP712Domain key in the types map.
     delete types.EIP712Domain;
     return wallet.signTypedData(typedData.domain, types, typedData.message);
+}
+// ─── dApp RPC passthrough ─────────────────────────────────────────────────
+//
+// Read-only EVM methods that dApps regularly call against the wallet's
+// provider. We forward each one to the configured ApeChain RPC and return
+// the raw result. Anything not in this set is refused at the gateway.
+//
+// What's intentionally NOT here: anything that signs, sends, or mutates
+// state. eth_sendTransaction / personal_sign / eth_signTypedData_v4 /
+// eth_signTransaction / eth_sign all go through the explicit handlers in
+// the content script (which open the approval popup).
+const SAFE_PASSTHROUGH_METHODS = new Set([
+    'eth_blockNumber',
+    'eth_getBalance',
+    'eth_getCode',
+    'eth_getStorageAt',
+    'eth_call',
+    'eth_estimateGas',
+    'eth_gasPrice',
+    'eth_maxPriorityFeePerGas',
+    'eth_feeHistory',
+    'eth_blobBaseFee',
+    'eth_getBlockByNumber',
+    'eth_getBlockByHash',
+    'eth_getBlockTransactionCountByHash',
+    'eth_getBlockTransactionCountByNumber',
+    'eth_getTransactionByHash',
+    'eth_getTransactionByBlockHashAndIndex',
+    'eth_getTransactionByBlockNumberAndIndex',
+    'eth_getTransactionReceipt',
+    'eth_getTransactionCount',
+    'eth_getLogs',
+    'eth_getProof',
+    'eth_getUncleByBlockHashAndIndex',
+    'eth_getUncleByBlockNumberAndIndex',
+    'eth_protocolVersion',
+    'eth_syncing',
+    'eth_coinbase',
+    'eth_mining',
+    'eth_hashrate',
+    // NOTE: eth_*Filter* methods are intentionally NOT here. They are stateful
+    // at the RPC node and the wallet shares ONE provider across all origins, so
+    // a malicious origin could (a) DoS the upstream filter quota for everyone
+    // and (b) potentially read filter IDs registered by another origin. dApps
+    // in 2026 generally use polling on eth_blockNumber + eth_getLogs instead.
+    'web3_clientVersion',
+    'web3_sha3',
+    'net_listening',
+    'net_peerCount',
+]);
+// Caps on dApp-supplied parameters for the heaviest passthrough methods.
+const ETH_GETLOGS_MAX_RANGE = 10_000; // blocks per call
+const ETH_CALL_MAX_DATA_BYTES = 256 * 1024; // 256 KB calldata
+export function isSafePassthroughMethod(method) {
+    return SAFE_PASSTHROUGH_METHODS.has(method);
+}
+function parseBlockTag(tag) {
+    if (typeof tag !== 'string')
+        return null;
+    if (tag === 'earliest')
+        return 0;
+    if (tag === 'latest' || tag === 'safe' || tag === 'finalized' || tag === 'pending')
+        return -1;
+    if (tag.startsWith('0x')) {
+        try {
+            const n = Number(BigInt(tag));
+            return Number.isFinite(n) ? n : null;
+        }
+        catch {
+            return null;
+        }
+    }
+    const n = Number(tag);
+    return Number.isFinite(n) ? n : null;
+}
+// Reject obviously abusive eth_getLogs calls (huge ranges) and oversized
+// eth_call calldata. Both of these have caused real-world wallet outages when
+// a dApp loops a wide log scan or sends a multi-MB call payload — we keep the
+// upstream RPC budget for legitimate callers.
+export async function validateDappRpcParams(method, params) {
+    if (method === 'eth_getLogs') {
+        const filter = (Array.isArray(params) ? params[0] : null);
+        if (!filter || typeof filter !== 'object')
+            return;
+        if (filter.blockHash)
+            return; // single-block lookup is bounded
+        const from = parseBlockTag(filter.fromBlock);
+        const to = parseBlockTag(filter.toBlock);
+        // -1 means "latest"-family — we don't know the head block here without
+        // an RPC roundtrip. Treat unspecified or "latest" as bounded if from
+        // is also unspecified or recent; otherwise require a numeric upper.
+        if (from === 0 && (to === -1 || to == null)) {
+            throw new Error(`eth_getLogs: range too large (use a fromBlock window of at most ${ETH_GETLOGS_MAX_RANGE} blocks)`);
+        }
+        if (from != null && from >= 0 && to != null && to >= 0 && to - from > ETH_GETLOGS_MAX_RANGE) {
+            throw new Error(`eth_getLogs: range ${to - from} exceeds cap of ${ETH_GETLOGS_MAX_RANGE} blocks`);
+        }
+    }
+    else if (method === 'eth_call') {
+        const callObj = (Array.isArray(params) ? params[0] : null);
+        const data = callObj && typeof callObj === 'object' ? (callObj.data ?? callObj.input) : undefined;
+        if (typeof data === 'string' && data.length > 2 + ETH_CALL_MAX_DATA_BYTES * 2) {
+            throw new Error(`eth_call: calldata exceeds cap of ${ETH_CALL_MAX_DATA_BYTES} bytes`);
+        }
+    }
+}
+export async function dappRpc(network, method, params) {
+    if (!isSafePassthroughMethod(method)) {
+        throw new Error(`Method not supported: ${method}`);
+    }
+    const arr = Array.isArray(params) ? params : params == null ? [] : [params];
+    await validateDappRpcParams(method, arr);
+    const provider = getProvider(network);
+    return await provider.send(method, arr);
 }
 // Used by tests / consumers to clear shared providers between runs.
 export function disconnectAll() {

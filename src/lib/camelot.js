@@ -13,8 +13,18 @@
 import { Contract, Interface, ZeroAddress, Wallet, formatUnits, parseUnits, } from 'ethers';
 import { NETWORKS } from './networks';
 import { getProvider } from './evm';
+import { TRADING_FEE_BPS, TRADING_FEE_TREASURY } from './constants';
 export const CAMELOT_V2_ROUTER = '0x18E621B64d7808c3C47bccbbD7485d23F257D26f';
 export const WAPE_ADDRESS = '0x48b62137EdfA95a428D35C09E44256a739F6B557';
+// Re-export so existing import paths from camelot.ts keep working without
+// pulling consumers into the heavy ethers/Contract dependency just to read
+// a constant. The single source of truth lives in `./constants`.
+export { TRADING_FEE_BPS, TRADING_FEE_TREASURY };
+/** Apply the trading-fee skim to a raw input amount. */
+function applyFeeSkim(amountIn) {
+    const fee = (amountIn * BigInt(TRADING_FEE_BPS)) / 10000n;
+    return { fee, afterFee: amountIn - fee };
+}
 // Camelot V2 is a Uniswap V2 fork with one extra `referrer` argument on the
 // "SupportingFeeOnTransferTokens" variants. We always pass address(0).
 const ROUTER_ABI = [
@@ -26,6 +36,7 @@ const ROUTER_ABI = [
 const ERC20_ABI = [
     'function allowance(address owner, address spender) view returns (uint256)',
     'function approve(address spender, uint256 amount) returns (bool)',
+    'function transfer(address to, uint256 amount) returns (bool)',
 ];
 const routerIface = new Interface(ROUTER_ABI);
 export function isNativeAddress(addr) {
@@ -69,6 +80,9 @@ export async function quoteSwap(req) {
     if (!Number.isFinite(inN) || inN <= 0)
         return null;
     const amountInRaw = parseUnits(req.amountIn, req.tokenIn.decimals);
+    // Apply the trading-fee skim — quotes are based on what's actually swapped
+    // (input minus the 0.5% Yacht fee), so the user sees the post-fee output.
+    const { fee: feeAmountInRaw, afterFee: amountInForSwap } = applyFeeSkim(amountInRaw);
     // Try the most direct path first (in→out); fall back to in→WAPE→out.
     const inAddr = asPathAddress(req.tokenIn.address);
     const outAddr = asPathAddress(req.tokenOut.address);
@@ -85,7 +99,7 @@ export async function quoteSwap(req) {
     }
     let best = null;
     for (const c of candidates) {
-        const amounts = await tryGetAmountsOut(provider, amountInRaw, c.path);
+        const amounts = await tryGetAmountsOut(provider, amountInForSwap, c.path);
         if (!amounts)
             continue;
         const out = amounts[amounts.length - 1];
@@ -97,6 +111,7 @@ export async function quoteSwap(req) {
     }
     if (!best)
         return null;
+    // Display the user-entered amount, but quote the post-fee output.
     const amountInDisplay = formatUnits(amountInRaw, req.tokenIn.decimals);
     const amountOutDisplay = formatUnits(best.amountOut, req.tokenOut.decimals);
     const rate = parseFloat(amountOutDisplay) / parseFloat(amountInDisplay);
@@ -109,6 +124,9 @@ export async function quoteSwap(req) {
         path: best.path,
         router: CAMELOT_V2_ROUTER,
         direct: best.direct,
+        feeAmountInRaw: feeAmountInRaw.toString(),
+        feeAmountInDisplay: formatUnits(feeAmountInRaw, req.tokenIn.decimals),
+        feeBps: TRADING_FEE_BPS,
     };
 }
 const MAX_GAS_PRICE_GWEI = 500n;
@@ -175,7 +193,10 @@ export async function executeSwap(params) {
     const path = buildPath(params.tokenIn, params.tokenOut);
     if (path.length < 2)
         throw new Error('Cannot swap a token to itself');
-    const amountIn = parseUnits(params.amountIn, params.tokenIn.decimals);
+    const totalAmountIn = parseUnits(params.amountIn, params.tokenIn.decimals);
+    // Skim 0.5% to the Yacht treasury BEFORE the swap. The router only ever
+    // sees the post-fee amount; expectedOut/minOut are already quoted on that.
+    const { fee: feeAmountIn, afterFee: amountIn } = applyFeeSkim(totalAmountIn);
     const expectedOut = parseFloat(params.expectedOut);
     if (!Number.isFinite(expectedOut) || expectedOut <= 0)
         throw new Error('Invalid expected output');
@@ -184,6 +205,10 @@ export async function executeSwap(params) {
     const minOut = parseUnits(minOutFloat.toFixed(Math.min(18, params.tokenOut.decimals)), params.tokenOut.decimals);
     const isNativeIn = isNativeAddress(params.tokenIn.address);
     const isNativeOut = isNativeAddress(params.tokenOut.address);
+    // Build the router calldata first so we can SIMULATE the swap before we
+    // touch the user's funds. This catches the deterministic-revert cases
+    // (no liquidity, bad path, missing allowance) that would otherwise charge
+    // the 0.5% fee and leave the user with no swap.
     let txData;
     let value = 0n;
     if (isNativeIn && !isNativeOut) {
@@ -206,15 +231,47 @@ export async function executeSwap(params) {
         // Both sides native — caller error
         throw new Error('Cannot swap APE for APE');
     }
-    const overrides = await buildOverrides(provider, { to: CAMELOT_V2_ROUTER, data: txData, value }, wallet.address);
-    // Estimate gas; pad 25% — Camelot's FoT path can vary.
+    // Pre-flight simulation BEFORE charging the trading fee. We're estimating
+    // against current chain state, with the user's full pre-fee balance and the
+    // router allowance already in place. A revert here means the swap would
+    // certainly have reverted on-chain — refuse and keep the fee unspent.
+    // (We can't eliminate the post-fee/pre-swap window where slippage drifts;
+    // that would require a batched router contract. This catches the easy cases.)
+    let swapGasLimit;
     try {
-        const est = await provider.estimateGas({ from: wallet.address, ...overrides });
-        overrides.gasLimit = (est * 125n) / 100n;
+        const est = await provider.estimateGas({
+            from: wallet.address,
+            to: CAMELOT_V2_ROUTER,
+            data: txData,
+            value,
+        });
+        swapGasLimit = (est * 125n) / 100n;
     }
     catch (e) {
-        throw new Error(`Swap simulation failed: ${e.message}`);
+        throw new Error(`Swap simulation failed: ${e.message} — no fee charged`);
     }
+    // Simulation passed → charge the fee, then send the swap.
+    if (feeAmountIn > 0n) {
+        const feeOverrides = await buildOverrides(provider, {}, wallet.address);
+        let feeTx;
+        if (isNativeIn) {
+            feeTx = await wallet.sendTransaction({
+                to: TRADING_FEE_TREASURY,
+                value: feeAmountIn,
+                ...feeOverrides,
+            });
+        }
+        else {
+            const erc20 = new Contract(params.tokenIn.address, ERC20_ABI, wallet);
+            feeTx = await erc20.transfer(TRADING_FEE_TREASURY, feeAmountIn, feeOverrides);
+        }
+        const feeReceipt = await feeTx.wait();
+        if (!feeReceipt || feeReceipt.status !== 1) {
+            throw new Error('Trading fee transfer failed — swap aborted');
+        }
+    }
+    const overrides = await buildOverrides(provider, { to: CAMELOT_V2_ROUTER, data: txData, value }, wallet.address);
+    overrides.gasLimit = swapGasLimit;
     const sent = await wallet.sendTransaction(overrides);
     const receipt = await sent.wait();
     if (!receipt)

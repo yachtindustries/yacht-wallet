@@ -3,6 +3,7 @@ import { Link, useNavigate } from 'react-router-dom';
 import { Screen, BottomNav } from '../components/Layout';
 import { TokenLogo } from '../components/TokenLogo';
 import { YachtBackground } from '../components/YachtBackground';
+import { AddressActions } from '../components/AddressActions';
 import { useApp } from '../store';
 import { rpc } from '@/lib/messaging';
 import type { AccountSummary, Erc20Balance, OwnedNft } from '@/lib/evm';
@@ -13,6 +14,9 @@ const arrowIcon = chrome.runtime.getURL('public/actions/sendreceive.png');
 const swapIcon = chrome.runtime.getURL('public/actions/swap.png');
 
 const TRACKED_TOKENS_KEY = 'yacht.trackedTokens.v1';
+// Cache balance + price per token so the Swap screen's TokenPicker can show
+// them without hitting any APIs again.
+const PICKER_STATS_KEY = 'yacht.pickerStats.v1';
 
 interface TokenStats {
   priceUsd: number;
@@ -34,17 +38,16 @@ async function loadTrackedTokens(): Promise<string[]> {
 
 export default function Dashboard() {
   const nav = useNavigate();
-  const { meta, settings, showBackupNotice, setBackupNotice } = useApp();
+  const { meta, settings } = useApp();
   const active = meta?.publicAccounts.find((a) => a.id === meta?.activeAccountId) ?? meta?.publicAccounts[0];
   const [summary, setSummary] = useState<AccountSummary | null>(null);
   const [tokens, setTokens] = useState<Erc20Balance[]>([]);
   const [apeUsd, setApeUsd] = useState<number>(0);
   const [apeChange, setApeChange] = useState<number | null>(null);
   const [tokenStats, setTokenStats] = useState<Record<string, TokenStats>>({});
-  const [loading, setLoading] = useState(true);
+  const [, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [err, setErr] = useState<string | null>(null);
-  const [copied, setCopied] = useState(false);
   const [view, setView] = useState<'tokens' | 'nfts'>('tokens');
   const [nfts, setNfts] = useState<OwnedNft[]>([]);
   const [nftsLoading, setNftsLoading] = useState(false);
@@ -153,6 +156,20 @@ export default function Dashboard() {
   const ape = parseFloat(summary?.nativeBalance ?? '0');
   const apeValue = ape * apeUsd;
 
+  // Persist the latest balances + prices so the Swap-screen TokenPicker can
+  // surface them without re-fetching. Keyed: NATIVE for APE, lowercase
+  // contract address for ERC-20.
+  useEffect(() => {
+    const out: Record<string, { balance: string; priceUsd: number }> = {};
+    out['NATIVE'] = { balance: String(ape || 0), priceUsd: apeUsd || 0 };
+    for (const t of tokens) {
+      const k = t.token.address.toLowerCase();
+      const stat = tokenStats[k];
+      out[k] = { balance: t.balance, priceUsd: stat?.priceUsd ?? 0 };
+    }
+    void chrome.storage.local.set({ [PICKER_STATS_KEY]: out });
+  }, [tokens, tokenStats, ape, apeUsd]);
+
   const totalUsd = useMemo(() => {
     let total = apeValue;
     for (const t of tokens) {
@@ -164,22 +181,12 @@ export default function Dashboard() {
     return total;
   }, [apeValue, tokens, tokenStats]);
 
+  // Only ever render tokens with a non-zero balance on the active account.
+  // Tokens that another account in this wallet holds (but the active account
+  // doesn't) are deliberately hidden — they'd otherwise appear under a
+  // confusing "empty balance" disclosure, suggesting the user owned tokens
+  // they don't.
   const nonZero = tokens.filter((t) => parseFloat(t.balance) !== 0);
-  const zero = tokens.filter((t) => parseFloat(t.balance) === 0);
-
-  async function copyAddress() {
-    if (!active) return;
-    await navigator.clipboard.writeText(active.address);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 1400);
-  }
-
-  async function untrackToken(addr: string) {
-    const tracked = await loadTrackedTokens();
-    const next = tracked.filter((t) => t.toLowerCase() !== addr.toLowerCase());
-    await chrome.storage.local.set({ [TRACKED_TOKENS_KEY]: next });
-    setTokens((xs) => xs.filter((x) => x.token.address.toLowerCase() !== addr.toLowerCase()));
-  }
 
   if (!active) return null;
 
@@ -194,7 +201,7 @@ export default function Dashboard() {
         <div className="relative z-10">
           {/* Top header — over the water */}
           <div className="flex items-center justify-between px-4 pt-3 pb-2">
-            <div className="flex items-center gap-3 min-w-0">
+            <div className="flex items-center gap-2 min-w-0">
               <Link to="/accounts" aria-label="Accounts">
                 <span
                   className="rounded-full bg-[#3a87b8]/55 hover:bg-[#3a87b8]/75 transition flex items-center justify-center font-bold text-white"
@@ -203,31 +210,13 @@ export default function Dashboard() {
                   {accountInitial(active.name)}
                 </span>
               </Link>
-              <button
-                onClick={copyAddress}
-                className="font-bold text-white hover:text-white/80 transition truncate"
-                style={{ fontSize: 15 }}
-                title="Copy address"
-              >
-                {copied ? 'Copied!' : shortAddress(active.address, 5, 4)}
-              </button>
+              <ClickToCopyAddress address={active.address} />
+              <AddressActions address={active.address} color="#ffffff" size={18} />
             </div>
+            <LayoutToggle />
           </div>
 
           <div className="px-4 pb-4">
-            {showBackupNotice && (
-              <div className="mb-3 p-3 rounded-xl bg-warn/10 border border-warn/30 text-xs text-warn flex items-start gap-2">
-                <span>⚠</span>
-                <div className="flex-1">
-                  <div className="font-medium">Back up your recovery phrase</div>
-                  <div className="text-warn/80 mt-0.5">
-                    Open <Link to="/accounts" className="underline">Accounts</Link> → Reveal phrase to copy your seed somewhere safe.
-                  </div>
-                </div>
-                <button onClick={() => setBackupNotice(false)} className="text-warn/70 hover:text-warn text-base leading-none">×</button>
-              </div>
-            )}
-
             {/* Total balance — no card, pure white text */}
             <div className="text-center mb-4 mt-2">
               <div className="text-[44px] leading-tight font-bold text-white">
@@ -245,7 +234,7 @@ export default function Dashboard() {
             </div>
 
             {/* Tokens / NFTs tab header */}
-            <div className="flex items-center gap-4 px-1 mb-3 pb-2">
+            <div className="flex items-center gap-4 mb-3 pb-2" style={{ marginTop: '6%' }}>
               <button
                 onClick={() => setView('tokens')}
                 className={`text-[18px] font-bold transition ${view === 'tokens' ? 'text-white' : 'text-white/55 hover:text-white/80'}`}
@@ -258,12 +247,12 @@ export default function Dashboard() {
               >
                 NFTs {nftsLoaded && <span className="text-[14px] font-bold opacity-80">({nfts.length})</span>}
               </button>
-              <div className="ml-auto flex items-center gap-1.5">
+              <div className="ml-auto flex items-center gap-0">
                 {view === 'tokens' && (
                   <Link
                     to="/search"
                     title="Add token"
-                    className="w-9 h-9 rounded-lg flex items-center justify-center text-white hover:bg-white/15"
+                    className="w-8 h-9 rounded-lg flex items-center justify-center text-white hover:bg-white/15"
                   >
                     <span className="text-2xl leading-none font-bold">+</span>
                   </Link>
@@ -272,7 +261,7 @@ export default function Dashboard() {
                   onClick={refresh}
                   disabled={refreshing}
                   title="Refresh"
-                  className={`w-9 h-9 rounded-lg flex items-center justify-center text-white hover:bg-white/15 ${refreshing ? 'animate-spin' : ''}`}
+                  className={`w-7 h-9 -mr-1 rounded-lg flex items-center justify-center text-white hover:bg-white/15 ${refreshing ? 'animate-spin' : ''}`}
                 >
                   <span className="text-xl leading-none font-bold">↻</span>
                 </button>
@@ -294,10 +283,10 @@ export default function Dashboard() {
                   </div>
                   <div className="text-right">
                     <div className="font-bold" style={{ fontSize: 16 }}>
-                      {ape.toLocaleString(undefined, { maximumFractionDigits: 3 })}
+                      ${apeValue.toLocaleString(undefined, { maximumFractionDigits: 2, minimumFractionDigits: 2 })}
                     </div>
                     <div className="text-ink-faint font-bold" style={{ fontSize: 13 }}>
-                      ${apeValue.toLocaleString(undefined, { maximumFractionDigits: 2, minimumFractionDigits: 2 })}
+                      {ape.toLocaleString(undefined, { maximumFractionDigits: 3 })}
                     </div>
                   </div>
                 </button>
@@ -332,58 +321,18 @@ export default function Dashboard() {
                       </div>
                       <div className="text-right">
                         <div className="font-bold" style={{ fontSize: 16 }}>
-                          {bal.toLocaleString(undefined, { maximumFractionDigits: 3 })}
-                        </div>
-                        <div className="text-ink-faint font-bold" style={{ fontSize: 13 }}>
                           {stat?.priceUsd != null && stat.priceUsd > 0
                             ? `$${value.toLocaleString(undefined, { maximumFractionDigits: 2, minimumFractionDigits: 2 })}`
                             : '—'}
+                        </div>
+                        <div className="text-ink-faint font-bold" style={{ fontSize: 13 }}>
+                          {bal.toLocaleString(undefined, { maximumFractionDigits: 3 })}
                         </div>
                       </div>
                     </button>
                   );
                 })}
 
-                {zero.length > 0 && (
-                  <details className="mt-2">
-                    <summary className="text-xs text-white/80 cursor-pointer px-1 font-bold">
-                      {zero.length} empty balance{zero.length === 1 ? '' : 's'}
-                    </summary>
-                    <div className="space-y-2 mt-2">
-                      {zero.map((t) => {
-                        const tm: TokenMeta = {
-                          symbol: t.token.symbol,
-                          name: t.token.name,
-                          address: safeChecksum(t.token.address),
-                          decimals: t.token.decimals,
-                        };
-                        return (
-                          <div key={t.token.address} className="card flex justify-between items-center opacity-80">
-                            <div className="flex items-center gap-3">
-                              <TokenLogo token={tm} size={32} />
-                              <div>
-                                <div className="font-bold text-sm">{t.token.symbol}</div>
-                                <div className="text-[11px] text-ink-faint font-bold">{shortAddress(t.token.address)}</div>
-                              </div>
-                            </div>
-                            <button
-                              className="text-xs text-ink-dim hover:text-danger font-bold"
-                              onClick={(e) => { e.stopPropagation(); void untrackToken(t.token.address); }}
-                            >
-                              Hide
-                            </button>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  </details>
-                )}
-
-                {!loading && tokens.length === 0 && (
-                  <div className="text-center text-xs text-white/85 py-4 font-bold">
-                    No tracked ERC-20 tokens. Tap + to add one.
-                  </div>
-                )}
               </div>
             ) : (
               <NftGrid nfts={nfts} loading={nftsLoading} loaded={nftsLoaded} />
@@ -414,29 +363,112 @@ function ActionBtn({
     <Link
       to={to}
       aria-label={label}
-      className="aspect-square flex flex-col items-center justify-center gap-1 rounded-2xl bg-[#3a87b8]/55 hover:bg-[#3a87b8]/75 transition"
+      className="aspect-square flex flex-col items-center justify-center rounded-2xl bg-[#3a87b8]/55 hover:bg-[#3a87b8]/75 transition relative"
     >
-      <span
-        role="img"
-        aria-hidden
-        className="block"
-        style={{
-          width: iconSize,
-          height: iconSize,
-          backgroundColor: '#ffffff',
-          WebkitMaskImage: `url(${icon})`,
-          maskImage: `url(${icon})`,
-          WebkitMaskRepeat: 'no-repeat',
-          maskRepeat: 'no-repeat',
-          WebkitMaskPosition: 'center',
-          maskPosition: 'center',
-          WebkitMaskSize: 'contain',
-          maskSize: 'contain',
-          transform: rotate ? `rotate(${rotate}deg)` : undefined,
-        }}
-      />
-      <span className="text-[11px] font-bold text-white">{label}</span>
+      {/* Fixed-height icon row so all 3 labels align regardless of iconSize */}
+      <div className="h-8 flex items-center justify-center" style={{ marginTop: '10%' }}>
+        <span
+          role="img"
+          aria-hidden
+          className="block"
+          style={{
+            width: iconSize,
+            height: iconSize,
+            backgroundColor: '#ffffff',
+            WebkitMaskImage: `url(${icon})`,
+            maskImage: `url(${icon})`,
+            WebkitMaskRepeat: 'no-repeat',
+            maskRepeat: 'no-repeat',
+            WebkitMaskPosition: 'center',
+            maskPosition: 'center',
+            WebkitMaskSize: 'contain',
+            maskSize: 'contain',
+            transform: rotate ? `rotate(${rotate}deg)` : undefined,
+          }}
+        />
+      </div>
+      <span className="font-bold text-white mt-1" style={{ fontSize: 13 }}>{label}</span>
     </Link>
+  );
+}
+
+function ClickToCopyAddress({ address }: { address: string }) {
+  const [showCopy, setShowCopy] = useState(false);
+  async function onClick() {
+    try {
+      await navigator.clipboard.writeText(address);
+      setShowCopy(true);
+      setTimeout(() => setShowCopy(false), 2000);
+    } catch { /* clipboard denied */ }
+  }
+  return (
+    <button
+      onClick={onClick}
+      className="font-bold text-white hover:text-white/80 transition truncate"
+      style={{ fontSize: 15 }}
+      title={showCopy ? 'Copied' : 'Copy address'}
+    >
+      {showCopy ? 'copied' : shortAddress(address, 5, 4)}
+    </button>
+  );
+}
+
+function LayoutToggle() {
+  const [mode, setMode] = useState<'popup' | 'sidepanel'>('popup');
+  useEffect(() => {
+    rpc({ type: 'layout.get' }).then((r) => setMode(r.mode)).catch(() => {});
+  }, []);
+  async function toggle() {
+    const next = mode === 'popup' ? 'sidepanel' : 'popup';
+    try {
+      if (next === 'sidepanel') {
+        // Open the side panel from THIS context first — Chrome requires
+        // sidePanel.open to be called inside a user-gesture handler, and
+        // forwarding via background drops the gesture in some Chrome
+        // versions. Then we tell the background to persist + reconfigure.
+        try {
+          const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+          const tabId = tabs[0]?.id;
+          if (tabId != null) {
+            await chrome.sidePanel.open({ tabId });
+          }
+        } catch { /* fall through; background will configure on next click */ }
+        await rpc({ type: 'layout.set', mode: 'sidepanel' });
+        setMode('sidepanel');
+        // Popup mode will close itself when focus moves to the side panel.
+        window.close();
+      } else {
+        // Side panel → popup. The background opens the popup first while we
+        // still have a user-gesture, then disables the side panel which
+        // dismisses it via Chrome. Do NOT call window.close() here — when
+        // running in the side-panel context, that closed the popup along
+        // with the panel because of focus-shift behaviour.
+        await rpc({ type: 'layout.set', mode: 'popup' });
+        setMode('popup');
+      }
+    } catch { /* ignore */ }
+  }
+  return (
+    <button
+      onClick={toggle}
+      aria-label={mode === 'popup' ? 'Open as side panel' : 'Switch back to popup'}
+      title={mode === 'popup' ? 'Open as side panel' : 'Switch back to popup'}
+      className="rounded-lg p-1 hover:bg-white/15 text-white"
+    >
+      {mode === 'popup' ? (
+        // "Side panel" glyph: small box pinned to the right
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <rect x="3" y="4" width="18" height="16" rx="2" />
+          <line x1="15" y1="4" x2="15" y2="20" />
+        </svg>
+      ) : (
+        // "Popup" glyph: small floating window
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <rect x="6" y="5" width="14" height="14" rx="2" />
+          <polyline points="3 10 3 4 9 4" />
+        </svg>
+      )}
+    </button>
   );
 }
 

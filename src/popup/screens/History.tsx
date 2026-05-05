@@ -7,6 +7,8 @@ import type { HistoryEntry, HistoryTransfer } from '@/lib/evm';
 import { NETWORKS } from '@/lib/networks';
 import { shortAddress } from '@/lib/wallet-utils';
 import { APE, TokenMeta, safeChecksum } from '@/lib/tokens';
+import { TRADING_FEE_TREASURY } from '@/lib/constants';
+import { YACHT_CHAT_INBOX } from '@/lib/chat';
 
 const arrowIcon = chrome.runtime.getURL('public/actions/sendreceive.png');
 const swapIcon = chrome.runtime.getURL('public/actions/swap.png');
@@ -73,39 +75,103 @@ function ActionGlyph({ type }: ActionGlyphProps) {
   );
 }
 
+type FilterKey = 'all' | 'send' | 'swap' | 'receive';
+const FILTERS: { key: FilterKey; label: string }[] = [
+  { key: 'all', label: 'All' },
+  { key: 'send', label: 'Send' },
+  { key: 'swap', label: 'Swap' },
+  { key: 'receive', label: 'Receive' },
+];
+
 export default function History() {
   const { meta, settings } = useApp();
   const active = meta?.publicAccounts.find((a) => a.id === meta?.activeAccountId);
   const [items, setItems] = useState<HistoryEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
+  const [filter, setFilter] = useState<FilterKey>('all');
 
   useEffect(() => {
     if (!active) return;
     setLoading(true);
     setErr(null);
     rpc({ type: 'evm.history', address: active.address })
-      .then(setItems)
+      .then((all) => {
+        // Hide implementation-detail sends from the activity feed:
+        //   • the trading-fee skim that accompanies every swap, and
+        //   • chat-message sends to the on-chain chat inbox.
+        const treasuryLc = TRADING_FEE_TREASURY.toLowerCase();
+        const chatInboxLc = YACHT_CHAT_INBOX.toLowerCase();
+        const filtered = all.filter((t) => {
+          // Hide chat sends regardless of value/transfer count — the activity
+          // feed lists trading actions, and chat lives in its own screen.
+          if ((t.to ?? '').toLowerCase() === chatInboxLc) return false;
+          // Drop sends whose only outgoing transfer is to the treasury.
+          if (t.type !== 'send') return true;
+          if (t.transfers.length !== 1) return true;
+          const tr = t.transfers[0];
+          if (tr.direction !== 'out') return true;
+          return tr.to.toLowerCase() !== treasuryLc;
+        });
+        setItems(filtered);
+      })
       .catch((e) => setErr((e as Error).message))
       .finally(() => setLoading(false));
   }, [active?.address, settings?.network]);
 
   const explorer = NETWORKS[settings?.network ?? 'mainnet'].explorerTx;
 
+  // Apply current type filter, then group by calendar day.
+  const visible = items.filter((t) => filter === 'all' || t.type === filter);
+  const grouped: { dayLabel: string; entries: HistoryEntry[] }[] = [];
+  for (const t of visible) {
+    const ts = t.timestamp ? t.timestamp * 1000 : Date.now();
+    const label = formatDayHeader(ts);
+    const last = grouped[grouped.length - 1];
+    if (last && last.dayLabel === label) last.entries.push(t);
+    else grouped.push({ dayLabel: label, entries: [t] });
+  }
+
   return (
     <Screen>
       <TopBar title="Activity" tone="deck" />
       <Page tone="deck">
+        {/* Type-filter buttons */}
+        <div className="flex gap-2 mb-3">
+          {FILTERS.map((f) => {
+            const active = f.key === filter;
+            return (
+              <button
+                key={f.key}
+                onClick={() => setFilter(f.key)}
+                className={`flex-1 py-1.5 rounded-lg font-bold transition ${
+                  active ? 'bg-white text-ink' : 'bg-bg-soft text-ink-dim hover:bg-white/40'
+                }`}
+                style={{ fontSize: 14 }}
+              >
+                {f.label}
+              </button>
+            );
+          })}
+        </div>
         {loading && <div className="text-ink-dim text-sm">Loading…</div>}
         {err && <div className="text-danger text-xs">{err}</div>}
-        {!loading && items.length === 0 && (
+        {!loading && visible.length === 0 && (
           <div className="text-center text-ink-dim text-sm mt-12">
             <div className="text-3xl mb-2">≡</div>
             No transactions yet.
           </div>
         )}
         <div className="space-y-2">
-          {items.map((t) => {
+          {grouped.flatMap((g, gi) => [
+            <div
+              key={`hdr-${gi}`}
+              className="font-bold text-white uppercase tracking-wider px-1 mt-3 first:mt-0"
+              style={{ fontSize: 12 }}
+            >
+              {g.dayLabel}
+            </div>,
+            ...g.entries.map((t) => {
             const label =
               t.type === 'swap' ? 'Swap' :
               t.type === 'receive' ? 'Receive' :
@@ -136,16 +202,16 @@ export default function History() {
                       )}
                     </div>
                     <div className="min-w-0">
-                      <div className="text-sm font-semibold flex items-center gap-1.5">
+                      <div className="font-semibold flex items-center gap-1.5" style={{ fontSize: 17 }}>
                         <ActionGlyph type={t.type} />
                         <span>{label}</span>
                       </div>
                       {counterparty && (
-                        <div className="text-[11px] text-ink-faint font-mono truncate">
+                        <div className="text-ink-faint font-mono truncate" style={{ fontSize: 13 }}>
                           {t.type === 'receive' ? `from ${shortAddress(counterparty)}` : `to ${shortAddress(counterparty)}`}
                         </div>
                       )}
-                      <div className="text-[10px] text-ink-faint mt-0.5">
+                      <div className="text-ink-faint mt-0.5" style={{ fontSize: 12 }}>
                         {t.timestamp ? new Date(t.timestamp * 1000).toLocaleString() : ''}
                       </div>
                     </div>
@@ -165,19 +231,20 @@ export default function History() {
                         <Amount key={i} t={x} sign={x.direction === 'in' ? '+' : x.direction === 'out' ? '-' : ''} />
                       ))
                     ) : (
-                      <div className="text-sm font-mono text-ink-dim">—</div>
+                      <div className="font-bold text-ink-dim" style={{ fontSize: 16 }}>—</div>
                     )}
-                    <div className="text-[10px] mt-0.5 flex items-center justify-end gap-1">
+                    <div className="mt-0.5 flex items-center justify-end gap-1" style={{ fontSize: 12 }}>
                       <span className={t.status === 'success' ? 'text-ink-faint' : 'text-danger'}>
                         {t.status === 'success' ? 'Success' : t.status === 'failed' ? 'Failed' : 'Pending'}
                       </span>
-                      {t.status !== 'pending' && <StatusBadge ok={t.status === 'success'} sizeEm={2} />}
+                      {t.status !== 'pending' && <StatusBadge ok={t.status === 'success'} sizeEm={1.1} />}
                     </div>
                   </div>
                 </div>
               </a>
             );
-          })}
+            }),
+          ])}
         </div>
       </Page>
       <BottomNav />
@@ -185,19 +252,44 @@ export default function History() {
   );
 }
 
+function formatDayHeader(ms: number): string {
+  const d = new Date(ms);
+  const today = new Date();
+  const yest = new Date(today);
+  yest.setDate(today.getDate() - 1);
+  const sameDay = (a: Date, b: Date) =>
+    a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
+  if (sameDay(d, today)) return 'Today';
+  if (sameDay(d, yest)) return 'Yesterday';
+  return d.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric', year: d.getFullYear() === today.getFullYear() ? undefined : 'numeric' });
+}
+
+const activitySuccessUrl = chrome.runtime.getURL('activity-success.png');
+
 function StatusBadge({ ok, sizeEm }: { ok: boolean; sizeEm: number }) {
+  if (ok) {
+    return (
+      <img
+        src={activitySuccessUrl}
+        alt="Success"
+        className="inline-block"
+        style={{ width: `${sizeEm}em`, height: `${sizeEm}em` }}
+        aria-hidden
+      />
+    );
+  }
   return (
     <span
       className="inline-flex items-center justify-center rounded-full text-white font-bold leading-none"
       style={{
         width: `${sizeEm}em`,
         height: `${sizeEm}em`,
-        backgroundColor: ok ? '#16a34a' : '#dc2626',
+        backgroundColor: '#dc2626',
         fontSize: `${0.7 * sizeEm}em`,
       }}
       aria-hidden
     >
-      {ok ? '✓' : '✗'}
+      ✗
     </span>
   );
 }
@@ -207,7 +299,7 @@ function Amount({ t, sign }: { t: HistoryTransfer; sign: string }) {
   const amount = parseFloat(t.amount).toLocaleString(undefined, { maximumFractionDigits: 3 });
   const color = sign === '+' ? 'text-success' : sign === '-' ? 'text-danger' : 'text-ink';
   return (
-    <div className={`text-sm font-mono ${color}`}>
+    <div className={`font-bold ${color}`} style={{ fontSize: 16 }}>
       {sign}{amount} {symbol}
     </div>
   );

@@ -54,9 +54,6 @@ export default function CreateWallet() {
         <TopBar title="Create wallet" onBack={() => nav('/')} />
         <Page>
           <h2 className="text-lg font-semibold mb-4">Set a password</h2>
-          <p className="text-xs text-ink-dim mb-3">
-            This password encrypts your recovery phrase on this device. Yacht never stores or transmits it.
-          </p>
           <label className="label">Password</label>
           <div className="mb-3">
             <PasswordField value={pw} onChange={setPw} autoFocus showStrength />
@@ -71,8 +68,13 @@ export default function CreateWallet() {
             onChange={(e) => setPw2(e.target.value)}
           />
           {err && <div className="text-danger text-xs mb-2">{err}</div>}
-          <button className="btn-primary w-full" disabled={disabled} onClick={createWallet}>
-            {busy ? 'Creating…' : 'Continue'}
+          <button
+            className="btn w-full text-white font-bold bg-[#5eccfa] hover:bg-[#3eb8e8] disabled:opacity-100 flex items-center justify-center"
+            style={{ minHeight: 44 }}
+            disabled={disabled}
+            onClick={createWallet}
+          >
+            {busy ? <Spinner /> : 'Continue'}
           </button>
         </Page>
       </Screen>
@@ -107,12 +109,12 @@ export default function CreateWallet() {
               type="checkbox"
               checked={acknowledged}
               onChange={(e) => setAcknowledged(e.target.checked)}
-              className="mt-0.5"
+              className="mt-0.5 accent-[#5eccfa]"
             />
             <span>I have saved my recovery phrase. I understand Yacht cannot recover it for me.</span>
           </label>
           <button
-            className="btn-primary w-full"
+            className="btn w-full text-white font-bold bg-[#5eccfa] hover:bg-[#3eb8e8] disabled:opacity-50"
             disabled={!acknowledged}
             onClick={finalize}
           >
@@ -124,4 +126,19 @@ export default function CreateWallet() {
   }
 
   return null;
+}
+
+function Spinner() {
+  return (
+    <span
+      className="inline-block animate-spin rounded-full"
+      style={{
+        width: 22,
+        height: 22,
+        border: '3px solid rgba(255,255,255,0.45)',
+        borderTopColor: '#ffffff',
+      }}
+      aria-label="Working"
+    />
+  );
 }

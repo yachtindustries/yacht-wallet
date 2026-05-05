@@ -11,9 +11,19 @@ export default defineConfig({
   },
   build: {
     target: 'esnext',
+    minify: 'esbuild',
+    sourcemap: false,
     rollupOptions: {
       input: { popup: 'index.html' },
     },
+  },
+  // Strip console.* and debugger statements from the production bundle so a
+  // stray log inside ethers/dependencies can't leak addresses, balances, or
+  // request/response shapes to anyone with devtools open. Setting these
+  // explicitly (rather than relying on defaults) makes a future regression
+  // visible in the diff.
+  esbuild: {
+    drop: ['console', 'debugger'],
   },
   server: { port: 5173, strictPort: true, hmr: { port: 5173 } },
   define: { global: 'globalThis' },

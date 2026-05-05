@@ -17,10 +17,22 @@ export function TopBar({
   tone?: 'cream' | 'deck';
 }) {
   const nav = useNavigate();
+  const loc = useLocation();
   const isDeck = tone === 'deck';
   const bg = isDeck ? '#f6c87e' : '#fbf3df';
   const iconColor = isDeck ? '#ffffff' : '#2e2114';
   const titleClass = isDeck ? 'text-white' : 'text-ink';
+  // If a custom onBack is provided, use it. Otherwise, try to go back; but
+  // when there's no prior history (popup just opened on this route),
+  // react-router's nav(-1) does nothing — fall back to home so the button
+  // is never a dead-end.
+  function defaultBack() {
+    if (loc.key === 'default' || window.history.length <= 1) {
+      nav('/');
+    } else {
+      nav(-1);
+    }
+  }
   return (
     <div
       className="flex items-center justify-between px-4 h-12 sticky top-0 z-10"
@@ -28,7 +40,7 @@ export function TopBar({
     >
       <button
         className="w-10 text-left"
-        onClick={onBack ?? (() => nav(-1))}
+        onClick={onBack ?? defaultBack}
         aria-label="Back"
       >
         <span
@@ -91,6 +103,7 @@ const NAV_ITEMS: NavSpec[] = [
   { to: '/swap',    icon: 'public/nav/swap.png',     label: 'Swap' },
   { to: '/search',  icon: 'public/nav/search.png',   label: 'Search' },
   { to: '/history', icon: 'public/nav/activity.png', label: 'Activity' },
+  { to: '/chat',    icon: 'public/nav/chat.png',     label: 'Chat' },
 ];
 
 const NAV_ACTIVE_COLOR = '#6b4423';
@@ -102,7 +115,7 @@ const DECK_BG = '#f6c87e';
 export function BottomNav() {
   const loc = useLocation();
   return (
-    <div className="grid grid-cols-4 pt-2 pb-4" style={{ backgroundColor: DECK_BG }}>
+    <div className="grid grid-cols-5 pt-2 pb-4" style={{ backgroundColor: DECK_BG }}>
       {NAV_ITEMS.map((n) => {
         const isActive = loc.pathname === n.to;
         const url = chrome.runtime.getURL(n.icon);

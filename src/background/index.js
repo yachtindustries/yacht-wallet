@@ -16,7 +16,7 @@
 // • Pending dApp request limits: per-origin cap to prevent popup-spam.
 import { createVault, destroyVault, isInitialized, readMeta, rewriteVaultWithKey, unlockVault, changePassword, } from '@/lib/vault';
 import { fromB64, toB64 } from '@/lib/crypto';
-import { getAccountSummary, getErc20Balance, getErc20Balances, getErc20Info, getHistory, getOwnedNfts, personalSign, sendErc20, sendNative, signGenericTransaction, signTypedDataV4, simulateTransaction, } from '@/lib/evm';
+import { getAccountSummary, getErc20Balance, getErc20Balances, getErc20Info, getHistory, getOwnedNfts, dappRpc, personalSign, sendErc20, sendNative, signGenericTransaction, signTypedDataV4, simulateTransaction, } from '@/lib/evm';
 import { analyzePersonalSign, analyzeTxData, analyzeTypedData } from '@/lib/signing-detect';
 import { ensureAllowance, executeSwap, isNativeAddress, quoteSwap, } from '@/lib/camelot';
 import { parseUnits } from 'ethers';
@@ -24,6 +24,7 @@ import { deriveAccount, generateMnemonic, isValidMnemonic, walletFromPrivateKey,
 import { NETWORKS, readSettings, writeSettings } from '@/lib/networks';
 import { getApePrice } from '@/lib/price';
 import { getApeChainPair, getTrendingApeChainTokens } from '@/lib/dexscreener';
+import { getRecentMessages, sendChatMessage } from '@/lib/chat';
 import { friendlyError } from '@/lib/errors';
 import { assessTxRisk, hostFromOrigin } from '@/lib/security';
 import { getActiveAccount, isUnlocked, loadApprovedOrigins, lock, persistApprovedOrigins, state, } from './state';
@@ -36,6 +37,16 @@ const MAX_SLIPPAGE_BPS = 500; // 5% — limits MEV sandwich blast radius
 // background-served calls per minute. Defends against fingerprinting loops
 // (calling getAddress in a tight while(true)) and popup spam.
 const ORIGIN_RPC_BUDGET_PER_MIN = 120;
+// Surface stray promise rejections / uncaught errors in the SW console so a
+// silent failure in a top-level `void someAsync()` is visible during dev and
+// debuggable in prod. Without this they're swallowed and only show up as red
+// "Unhandled promise rejection" spam in chrome://extensions.
+self.addEventListener('unhandledrejection', (e) => {
+    console.error('[Yacht SW] unhandled promise rejection:', e.reason);
+});
+self.addEventListener('error', (e) => {
+    console.error('[Yacht SW] uncaught error:', e.error ?? e.message);
+});
 function uuid() {
     return crypto.randomUUID();
 }
@@ -55,10 +66,70 @@ chrome.alarms.onAlarm.addListener((a) => {
     }
 });
 void loadApprovedOrigins();
+// ───────────────────── popup vs side-panel layout ───────────────────────
+const LAYOUT_KEY = 'yacht.layoutMode.v1';
+async function readLayoutMode() {
+    try {
+        const r = await chrome.storage.local.get(LAYOUT_KEY);
+        const v = r[LAYOUT_KEY];
+        return v === 'sidepanel' || v === 'popup' ? v : 'popup';
+    }
+    catch {
+        return 'popup';
+    }
+}
+async function applyLayoutMode(mode) {
+    try {
+        if (mode === 'sidepanel') {
+            // Empty popup string makes the toolbar icon click route to onClicked
+            // and (because of setPanelBehavior below) Chrome opens the side panel.
+            await chrome.action.setPopup({ popup: '' });
+            await chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
+        }
+        else {
+            await chrome.action.setPopup({ popup: 'index.html' });
+            await chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: false });
+        }
+    }
+    catch { /* sidePanel may be unavailable on older Chrome */ }
+}
+// Apply persisted layout on every SW startup so the user's choice survives
+// browser restarts.
+void readLayoutMode().then(applyLayoutMode);
 // ───────────────────── unlock brute-force protection ─────────────────────
+// Persisted to chrome.storage.local so an attacker can't reset the lockout by
+// killing the MV3 service worker (which it does itself after ~30s idle).
+const UNLOCK_GATE_KEY = 'yacht.unlockGate.v1';
 let unlockFailures = 0;
 let unlockLockedUntil = 0;
-function unlockTryAllowed() {
+let unlockGateLoaded = null;
+function loadUnlockGate() {
+    return (unlockGateLoaded ??= (async () => {
+        try {
+            const r = await chrome.storage.local.get(UNLOCK_GATE_KEY);
+            const v = r[UNLOCK_GATE_KEY];
+            if (v && typeof v === 'object') {
+                const f = v.failures;
+                const u = v.lockedUntil;
+                if (typeof f === 'number' && Number.isFinite(f) && f >= 0)
+                    unlockFailures = f;
+                if (typeof u === 'number' && Number.isFinite(u) && u >= 0)
+                    unlockLockedUntil = u;
+            }
+        }
+        catch { /* fail open — in-memory defaults still apply */ }
+    })());
+}
+async function persistUnlockGate() {
+    try {
+        await chrome.storage.local.set({
+            [UNLOCK_GATE_KEY]: { failures: unlockFailures, lockedUntil: unlockLockedUntil },
+        });
+    }
+    catch { /* best effort */ }
+}
+async function unlockTryAllowed() {
+    await loadUnlockGate();
     if (Date.now() < unlockLockedUntil) {
         return { allowed: false, waitMs: unlockLockedUntil - Date.now() };
     }
@@ -67,6 +138,7 @@ function unlockTryAllowed() {
 function unlockSucceeded() {
     unlockFailures = 0;
     unlockLockedUntil = 0;
+    void persistUnlockGate();
 }
 function unlockFailed() {
     unlockFailures++;
@@ -74,6 +146,7 @@ function unlockFailed() {
         const factor = Math.pow(2, Math.min(6, unlockFailures - MAX_UNLOCK_FAILURES));
         unlockLockedUntil = Date.now() + UNLOCK_LOCKOUT_MS * factor;
     }
+    void persistUnlockGate();
 }
 // ───────────────────── per-origin RPC rate limit ─────────────────────────
 const originBuckets = new Map();
@@ -260,6 +333,12 @@ async function rehydrateFromSession() {
             bytes: fromB64(blob.keyB64),
             salt: fromB64(blob.saltB64),
         };
+        // Re-arm the auto-lock alarm. The previous SW instance's alarm survives a
+        // restart only if it hadn't fired yet; if we got here via an event after
+        // the alarm fired (which auto-deletes), the user's configured
+        // autoLockMinutes would otherwise be ignored and the wallet would stay
+        // unlocked up to the SESSION_GRACE_MS hard cap.
+        void setAutoLockAlarm();
     }
     catch {
         // If anything throws, fail closed (treat as locked).
@@ -330,23 +409,56 @@ async function openApprovalPopup(opts) {
         if (activeApprovalWindowId != null) {
             chrome.windows.update(activeApprovalWindowId, { focused: true }).catch(() => {
                 activeApprovalWindowId = null;
-                spawnPopup(id);
+                spawnPopup(id, opts.sourceWindowId);
             });
         }
         else {
-            spawnPopup(id);
+            spawnPopup(id, opts.sourceWindowId);
         }
     });
 }
-function spawnPopup(requestId) {
-    chrome.windows.create({
-        url: chrome.runtime.getURL(`index.html#/request/${requestId}`),
-        type: 'popup',
-        width: 380,
-        height: 620,
-    }, (win) => {
-        if (win?.id != null)
-            activeApprovalWindowId = win.id;
+function spawnPopup(requestId, sourceWindowId) {
+    // Anchor the approval popup to the dApp's *originating* window. Reading
+    // chrome.windows.getLastFocused (the previous behaviour) was a TOCTOU
+    // vector: between request and resolve, an attacker site could focus its
+    // own window and have the real popup positioned over a spoofed Approve
+    // button. windowId is captured at request time from sender.tab.windowId
+    // and is stable for the lifetime of the dApp tab.
+    const POPUP_W = 380;
+    const POPUP_H = 620;
+    const lookup = sourceWindowId != null
+        ? chrome.windows.get(sourceWindowId).catch(() => null)
+        : chrome.windows.getLastFocused({ populate: false }).catch(() => null);
+    lookup.then((focused) => {
+        const isUsable = focused && focused.type === 'normal' && typeof focused.left === 'number';
+        if (!isUsable) {
+            chrome.windows.create({
+                url: chrome.runtime.getURL(`index.html#/request/${requestId}`),
+                type: 'popup',
+                width: POPUP_W,
+                height: POPUP_H,
+            }, (win) => {
+                if (win?.id != null)
+                    activeApprovalWindowId = win.id;
+            });
+            return;
+        }
+        const wLeft = focused.left ?? 0;
+        const wTop = focused.top ?? 0;
+        const wWidth = focused.width ?? 1280;
+        const left = Math.max(0, wLeft + wWidth - POPUP_W - 16);
+        const top = Math.max(0, wTop + 60);
+        chrome.windows.create({
+            url: chrome.runtime.getURL(`index.html#/request/${requestId}`),
+            type: 'popup',
+            width: POPUP_W,
+            height: POPUP_H,
+            left,
+            top,
+        }, (win) => {
+            if (win?.id != null)
+                activeApprovalWindowId = win.id;
+        });
     });
 }
 chrome.windows.onRemoved.addListener((windowId) => {
@@ -451,7 +563,7 @@ async function handle(req, sender) {
             return { address: account.address };
         }
         case 'vault.unlock': {
-            const gate = unlockTryAllowed();
+            const gate = await unlockTryAllowed();
             if (!gate.allowed) {
                 throw new Error(`Too many failed attempts. Try again in ${Math.ceil(gate.waitMs / 1000)}s.`);
             }
@@ -689,6 +801,17 @@ async function handle(req, sender) {
         }
         case 'dex.token': return await getApeChainPair(req.query);
         case 'dex.trending': return await getTrendingApeChainTokens(req.limit ?? 10);
+        // ───────────────────── on-chain chat ─────────────────────
+        case 'chat.list': {
+            const settings = await readSettings();
+            return await getRecentMessages(settings.network, req.limit ?? 15);
+        }
+        case 'chat.send': {
+            await requireUnlocked();
+            const acct = findAccount(req.account);
+            const settings = await readSettings();
+            return await submitSerialized(acct.address, () => sendChatMessage(settings.network, acct.privateKey, req.text));
+        }
         // ───────────────────── dApp-originated ─────────────────────
         case 'dapp.connect': {
             if (!isDappRequest)
@@ -705,7 +828,12 @@ async function handle(req, sender) {
                 if (a)
                     return { address: a.address, chainId: cfg.chainIdHex };
             }
-            const r = await openApprovalPopup({ type: 'connect', origin, payload: { origin } });
+            const r = await openApprovalPopup({
+                type: 'connect',
+                origin,
+                payload: { origin },
+                sourceWindowId: sender?.tab?.windowId,
+            });
             return r;
         }
         case 'dapp.getAddress': {
@@ -774,6 +902,7 @@ async function handle(req, sender) {
                     dataAnalysis,
                     simulation: sim,
                 },
+                sourceWindowId: sender?.tab?.windowId,
             });
         }
         case 'dapp.personalSign': {
@@ -799,6 +928,7 @@ async function handle(req, sender) {
                 type: 'personalSign',
                 origin,
                 payload: { message: req.message, origin, warnings: a.warnings, isRawHash: a.isRawHash },
+                sourceWindowId: sender?.tab?.windowId,
             });
         }
         case 'dapp.signTypedData': {
@@ -818,7 +948,28 @@ async function handle(req, sender) {
                 type: 'signTypedData',
                 origin,
                 payload: { typedData: req.payload, origin, analysis },
+                sourceWindowId: sender?.tab?.windowId,
             });
+        }
+        case 'dapp.rpc': {
+            // Read-only chain queries (eth_getBalance, eth_estimateGas, eth_call,
+            // eth_getLogs, eth_blockNumber, etc). Forwarded to ApeChain RPC. The
+            // method whitelist lives in lib/evm.ts (SAFE_PASSTHROUGH_METHODS).
+            // Approval-requiring methods (sign / send) are NOT routed here — they
+            // have their own dedicated handlers above.
+            if (!isDappRequest)
+                throw new Error('Bad routing');
+            await loadApprovedOrigins();
+            const origin = senderOrigin(sender);
+            rateLimitOrigin(origin);
+            if (!state.approvedOrigins.has(origin))
+                throw new Error('Origin not connected');
+            // Lock = silence. While the wallet is locked, even approved origins
+            // cannot use the wallet's RPC for fingerprinting / chain monitoring.
+            if (!isUnlocked())
+                throw new Error('Wallet locked');
+            const settings = await readSettings();
+            return await dappRpc(settings.network, req.method, req.params);
         }
         // ───────────────────── popup → background (request UI) ─────
         case 'request.list': return [...state.pending.values()].map(stripCallbacks);
@@ -918,6 +1069,59 @@ async function handle(req, sender) {
         case 'origins.revoke': {
             state.approvedOrigins.delete(req.origin);
             await persistApprovedOrigins();
+            return { ok: true };
+        }
+        // Layout (popup vs side panel)
+        case 'layout.get': return { mode: await readLayoutMode() };
+        case 'layout.set': {
+            // Only accept the layout flip from the wallet's own popup / side panel
+            // — not from arbitrary extension pages. Even though `fromExtension` is
+            // already enforced above, this hardens against an XSS in some other
+            // extension page being able to flip the user's UI surface to disorient
+            // them right before an approval. sender.url for our popup is the
+            // chrome-extension origin + index.html (with optional query / hash).
+            const url = sender?.url ?? '';
+            const expected = chrome.runtime.getURL('index.html');
+            if (!url.startsWith(expected)) {
+                throw new Error('layout.set: unexpected sender');
+            }
+            if (req.mode !== 'popup' && req.mode !== 'sidepanel') {
+                throw new Error('layout.set: invalid mode');
+            }
+            await chrome.storage.local.set({ [LAYOUT_KEY]: req.mode });
+            await applyLayoutMode(req.mode);
+            const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+            if (req.mode === 'sidepanel' && tab?.id != null) {
+                // Open it on the active tab so the user sees the wallet move
+                // there immediately. (Best-effort — Chrome may require the call to
+                // come from a user-gesture context; the popup also tries directly.)
+                try {
+                    await chrome.sidePanel.open({ tabId: tab.id });
+                }
+                catch { /* ignore */ }
+            }
+            if (req.mode === 'popup' && tab?.id != null) {
+                // Open the popup synchronously (still in user-gesture window) so it
+                // shows up before the side panel is dismissed.
+                try {
+                    await chrome.action.openPopup();
+                }
+                catch { /* ignore */ }
+                // Disable the side panel on the active tab so it disappears.
+                try {
+                    await chrome.sidePanel.setOptions({ tabId: tab.id, enabled: false });
+                }
+                catch { /* ignore */ }
+                // Re-enable for next toggle, restoring the sidepanel-mode default path.
+                try {
+                    await chrome.sidePanel.setOptions({
+                        tabId: tab.id,
+                        enabled: true,
+                        path: 'index.html?sidepanel=1',
+                    });
+                }
+                catch { /* ignore */ }
+            }
             return { ok: true };
         }
     }

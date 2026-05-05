@@ -6,7 +6,10 @@ export const NETWORKS = {
         label: 'ApeChain',
         chainId: 33139,
         chainIdHex: '0x8173',
-        rpcUrl: 'https://rpc.apechain.com',
+        rpcUrls: [
+            'https://rpc.apechain.com',
+            'https://apechain.calderachain.xyz/http',
+        ],
         nativeSymbol: 'APE',
         nativeDecimals: 18,
         explorerUrl: 'https://apescan.io',

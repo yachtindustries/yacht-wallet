@@ -130,8 +130,27 @@ window.addEventListener('message', async (event) => {
         const r = await rpc({ type: 'dapp.getAddress' });
         return reply(true, r);
       }
-      default:
-        return reply(false, `Method not supported: ${data.method}`);
+      // Explicit refusals — these methods exist in the EIP-1193 spec but we
+      // intentionally do not implement them.
+      case 'eth_sign':
+        // Pre-EIP-191 raw signing. Drainer vector. No good wallet supports it.
+        return reply(false, 'eth_sign is unsafe and not supported. Use personal_sign instead.');
+      case 'eth_signTransaction':
+        // Yacht signs and sends in one step. Standalone signing without
+        // submission isn't part of our flow.
+        return reply(false, 'eth_signTransaction is not supported. Use eth_sendTransaction.');
+      default: {
+        // Read-only chain RPC passthrough (eth_getBalance, eth_estimateGas,
+        // eth_call, eth_getLogs, eth_blockNumber, etc). The background
+        // enforces a method whitelist and origin approval. Anything outside
+        // the whitelist comes back as "Method not supported".
+        try {
+          const r = await rpc({ type: 'dapp.rpc', method: data.method, params: data.params });
+          return reply(true, r);
+        } catch (e) {
+          return reply(false, sanitizeErr(e));
+        }
+      }
     }
   } catch (e) {
     reply(false, e);

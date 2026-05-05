@@ -49,7 +49,10 @@ if (!existsSync(dist)) {
       ok('Strict CSP declared');
     }
     if (Array.isArray(manifest.permissions)) {
-      const unusual = manifest.permissions.filter((p) => !['storage', 'alarms', 'idle', 'notifications'].includes(p));
+      // Yacht's full permission set lives in CWS_SUBMISSION.md with a
+      // justification per entry. Only flag truly unexpected additions here.
+      const expected = ['storage', 'alarms', 'idle', 'notifications', 'sidePanel', 'clipboardRead'];
+      const unusual = manifest.permissions.filter((p) => !expected.includes(p));
       if (unusual.length > 0) warn(`Unusual permissions: ${unusual.join(', ')} — make sure each is justified in the listing.`);
     }
     if (Array.isArray(manifest.host_permissions) && manifest.host_permissions.includes('<all_urls>')) {

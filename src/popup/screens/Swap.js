@@ -1,6 +1,6 @@
 import { jsx as _jsx, jsxs as _jsxs } from "react/jsx-runtime";
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useLocation } from 'react-router-dom';
 import { BottomNav, Page, Screen, TopBar } from '../components/Layout';
 import { TokenPicker } from '../components/TokenPicker';
 import { TokenLogo } from '../components/TokenLogo';
@@ -9,6 +9,7 @@ import { useApp } from '../store';
 import { rpc } from '@/lib/messaging';
 import { isNative, APE, CURTIS, safeChecksum } from '@/lib/tokens';
 const TRACKED_TOKENS_KEY = 'yacht.trackedTokens.v1';
+const PICKER_STATS_KEY = 'yacht.pickerStats.v1';
 const SLIPPAGE_OPTIONS = [50, 100, 300, 500];
 const FEE_BUFFER_APE = 0.005;
 const swapIconUrl = chrome.runtime.getURL('public/actions/swap.png');
@@ -16,18 +17,21 @@ const settingsIconUrl = chrome.runtime.getURL('public/actions/settings.png');
 // Yacht swaps run through the Camelot V2 router on ApeChain. Camelot is the
 // dominant DEX on ApeChain so most listed ERC-20s have liquidity there.
 export default function Swap() {
-    const nav = useNavigate();
+    const loc = useLocation();
     const { meta } = useApp();
     const active = meta?.publicAccounts.find((a) => a.id === meta?.activeAccountId);
-    const [tokenA, setTokenA] = useState(APE);
-    const [tokenB, setTokenB] = useState(CURTIS);
+    // Optional preselection forwarded from /token/:address (Swap button).
+    const presetIn = loc.state?.tokenIn;
+    const presetOut = loc.state?.tokenOut;
+    const [tokenA, setTokenA] = useState(presetIn ?? APE);
+    const [tokenB, setTokenB] = useState(presetOut ?? CURTIS);
     const [amountIn, setAmountIn] = useState('');
     const [pickerFor, setPickerFor] = useState(null);
     const [quote, setQuote] = useState(null);
     const [quoting, setQuoting] = useState(false);
     const [quoteErr, setQuoteErr] = useState(null);
     const [showSettings, setShowSettings] = useState(false);
-    const [slippageBps, setSlippageBps] = useState(300);
+    const [slippageBps, setSlippageBps] = useState(100);
     const [customSlip, setCustomSlip] = useState('');
     const [refreshSeconds, setRefreshSeconds] = useState(0);
     const [txStatus, setTxStatus] = useState('idle');
@@ -37,32 +41,58 @@ export default function Swap() {
     const [tokens, setTokens] = useState([]);
     const [tokenAUsd, setTokenAUsd] = useState(null);
     const [tokenBUsd, setTokenBUsd] = useState(null);
+    const [pickerStats, setPickerStats] = useState({});
+    // Read the dashboard's cached balances + prices once, so the TokenPicker
+    // can show them without firing any new network requests.
+    useEffect(() => {
+        chrome.storage.local.get(PICKER_STATS_KEY).then((r) => {
+            const v = r[PICKER_STATS_KEY];
+            if (v)
+                setPickerStats(v);
+        }).catch(() => { });
+    }, []);
     const debounceRef = useRef(null);
     const refreshRef = useRef(null);
-    useEffect(() => {
+    async function refreshBalances() {
         if (!active)
             return;
-        void (async () => {
-            const r = await chrome.storage.local.get(TRACKED_TOKENS_KEY);
-            const tracked = r[TRACKED_TOKENS_KEY] ?? [];
-            const [s, balances] = await Promise.all([
-                rpc({ type: 'evm.account', address: active.address }),
-                tracked.length
-                    ? rpc({ type: 'evm.erc20.balances', tokens: tracked, address: active.address })
-                    : Promise.resolve([]),
-            ]);
-            setSummary(s);
-            setTokens(balances);
-        })().catch(() => { });
+        const r = await chrome.storage.local.get(TRACKED_TOKENS_KEY);
+        const tracked = r[TRACKED_TOKENS_KEY] ?? [];
+        const [s, balances] = await Promise.all([
+            rpc({ type: 'evm.account', address: active.address }),
+            tracked.length
+                ? rpc({ type: 'evm.erc20.balances', tokens: tracked, address: active.address })
+                : Promise.resolve([]),
+        ]);
+        setSummary(s);
+        setTokens(balances);
+    }
+    useEffect(() => {
+        void refreshBalances().catch(() => { });
+        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [active?.address]);
     useEffect(() => {
-        const q = isNative(tokenA) ? 'apecoin' : tokenA.address;
-        rpc({ type: 'dex.token', query: q })
+        if (isNative(tokenA)) {
+            // dex.token('apecoin') doesn't reliably return an APE-priced ApeChain
+            // pair (APE is the native gas token; pools are TOKEN/WAPE). Use the
+            // dedicated CoinGecko-backed price.get route for APE.
+            rpc({ type: 'price.get' })
+                .then((p) => setTokenAUsd(p?.usd ?? null))
+                .catch(() => setTokenAUsd(null));
+            return;
+        }
+        rpc({ type: 'dex.token', query: tokenA.address })
             .then((p) => setTokenAUsd(p?.priceUsd ? parseFloat(p.priceUsd) : null))
             .catch(() => setTokenAUsd(null));
     }, [tokenA.address]);
     useEffect(() => {
-        const q = isNative(tokenB) ? 'apecoin' : tokenB.address;
+        if (isNative(tokenB)) {
+            rpc({ type: 'price.get' })
+                .then((p) => setTokenBUsd(p?.usd ?? null))
+                .catch(() => setTokenBUsd(null));
+            return;
+        }
+        const q = tokenB.address;
         rpc({ type: 'dex.token', query: q })
             .then((p) => setTokenBUsd(p?.priceUsd ? parseFloat(p.priceUsd) : null))
             .catch(() => setTokenBUsd(null));
@@ -205,6 +235,9 @@ export default function Swap() {
                     await trackToken(tokenB.address);
                 setTxStatus('success');
                 setTxMessage(`Swapped ${tokenA.symbol} → ${tokenB.symbol}`);
+                // Refresh balances so Pay/Receive boxes reflect the new amounts
+                // immediately, instead of forcing the user to reopen the screen.
+                void refreshBalances().catch(() => { });
             }
             else {
                 setTxStatus('error');
@@ -232,8 +265,8 @@ export default function Swap() {
     })), [tokens]);
     const showLowApeWarning = isNative(tokenA) && summary != null && availableApe < 0.001 && apeBalance > 0;
     return (_jsxs(Screen, { children: [_jsx(TopBar, { title: "Swap", tone: "deck", right: _jsx("button", { onClick: () => setShowSettings(true), className: "hover:opacity-80", "aria-label": "Swap settings", children: _jsx("span", { role: "img", "aria-hidden": true, className: "block", style: {
-                            width: 26,
-                            height: 26,
+                            width: 20,
+                            height: 20,
                             backgroundColor: '#ffffff',
                             WebkitMaskImage: `url(${settingsIconUrl})`,
                             maskImage: `url(${settingsIconUrl})`,
@@ -243,7 +276,7 @@ export default function Swap() {
                             maskPosition: 'center',
                             WebkitMaskSize: 'contain',
                             maskSize: 'contain',
-                        } }) }) }), _jsxs(Page, { tone: "deck", children: [showLowApeWarning && (_jsx("div", { className: "mb-3 p-3 rounded-xl bg-warn/10 border border-warn/30 text-xs text-warn", children: "Low APE balance \u2014 leave a small amount for gas." })), _jsxs("div", { className: "card mb-1", children: [_jsxs("div", { className: "text-[11px] text-ink-dim mb-2 flex justify-between items-center", children: [_jsx("span", { children: "You pay" }), _jsxs("div", { className: "flex items-center gap-1", children: [_jsx("button", { className: "px-2 py-0.5 rounded-md bg-bg-soft border border-line text-ink-dim hover:text-brand hover:border-brand text-[10px]", onClick: () => setFraction(0.25), disabled: spendableA <= 0, children: "25%" }), _jsx("button", { className: "px-2 py-0.5 rounded-md bg-bg-soft border border-line text-ink-dim hover:text-brand hover:border-brand text-[10px]", onClick: () => setFraction(0.5), disabled: spendableA <= 0, children: "50%" }), _jsx("button", { className: "px-2 py-0.5 rounded-md bg-brand/10 border border-brand/30 text-brand hover:bg-brand/20 text-[10px] font-medium", onClick: () => setFraction(1), disabled: spendableA <= 0, children: "MAX" })] })] }), _jsxs("div", { className: "flex items-center gap-2", children: [_jsx("input", { className: "bg-transparent flex-1 text-2xl font-semibold focus:outline-none w-0 min-w-0", inputMode: "decimal", value: amountIn, onChange: (e) => setAmountIn(e.target.value), placeholder: "0.0" }), _jsxs("button", { className: "flex items-center gap-2 bg-bg-soft border border-line rounded-xl px-2 py-2 hover:border-brand", onClick: () => setPickerFor('A'), children: [_jsx(TokenLogo, { token: tokenA, size: 24 }), _jsx("span", { className: "text-sm font-medium", children: tokenA.symbol.slice(0, 6) }), _jsx("span", { className: "text-ink-dim text-xs", children: "\u25BE" })] })] }), _jsxs("div", { className: "flex items-center justify-between mt-1 text-[11px]", children: [_jsx("span", { className: "text-ink-faint", children: inUsd != null ? `≈ $${inUsd}` : '' }), _jsx("span", { className: `font-bold ${overSpendable ? 'text-danger' : 'text-ink-faint'}`, children: spendableA.toLocaleString(undefined, { maximumFractionDigits: 3 }) })] }), overSpendable && (_jsxs("div", { className: "mt-1 text-[11px] text-danger", children: ["Insufficient ", tokenA.symbol, "."] }))] }), _jsx("div", { className: "flex justify-center -my-3 z-[1] relative", children: _jsx("button", { onClick: flip, className: "rounded-full flex items-center justify-center hover:opacity-90", style: { width: 28, height: 28, backgroundColor: '#5eccfa' }, "aria-label": "Swap tokens", children: _jsx("span", { role: "img", "aria-hidden": true, className: "block", style: {
+                        } }) }) }), _jsxs(Page, { tone: "deck", children: [showLowApeWarning && (_jsx("div", { className: "mb-3 p-3 rounded-xl bg-warn/10 border border-warn/30 text-xs text-warn", children: "Low APE balance \u2014 leave a small amount for gas." })), _jsxs("div", { className: "card mb-1", children: [_jsxs("div", { className: "text-[11px] text-ink-dim mb-2 flex justify-between items-center", children: [_jsx("span", { children: "You pay" }), _jsxs("div", { className: "flex items-center gap-1", children: [_jsx("button", { className: "px-2 py-0.5 rounded-md bg-bg-soft border border-line text-ink-dim hover:text-brand hover:border-brand text-[10px]", onClick: () => setFraction(0.25), disabled: spendableA <= 0, children: "25%" }), _jsx("button", { className: "px-2 py-0.5 rounded-md bg-bg-soft border border-line text-ink-dim hover:text-brand hover:border-brand text-[10px]", onClick: () => setFraction(0.5), disabled: spendableA <= 0, children: "50%" }), _jsx("button", { className: "px-2 py-0.5 rounded-md bg-brand/10 border border-brand/30 text-brand hover:bg-brand/20 text-[10px] font-medium", onClick: () => setFraction(1), disabled: spendableA <= 0, children: "MAX" })] })] }), _jsxs("div", { className: "flex items-center gap-2", children: [_jsx("input", { className: "bg-transparent flex-1 font-semibold focus:outline-none w-0 min-w-0", style: { fontSize: 30 }, inputMode: "decimal", value: amountIn, onChange: (e) => setAmountIn(e.target.value), placeholder: "0.0" }), _jsxs("button", { className: "flex items-center gap-2 bg-bg-soft border border-line rounded-xl px-2 py-2 hover:border-brand", onClick: () => setPickerFor('A'), children: [_jsx(TokenLogo, { token: tokenA, size: 31 }), _jsx("span", { className: "font-bold", style: { fontSize: 16 }, children: tokenA.symbol.slice(0, 6) })] })] }), _jsxs("div", { className: "flex items-center justify-between mt-1", children: [_jsx("span", { className: "text-ink-faint", style: { fontSize: 14 }, children: inUsd != null ? `≈ $${inUsd}` : '' }), _jsx("span", { className: `font-bold ${overSpendable ? 'text-danger' : 'text-ink-faint'}`, style: { fontSize: 14 }, children: spendableA.toLocaleString(undefined, { maximumFractionDigits: 3 }) })] }), overSpendable && (_jsxs("div", { className: "mt-1 text-[11px] text-danger", children: ["Insufficient ", tokenA.symbol, "."] }))] }), _jsx("div", { className: "flex justify-center -my-3 z-[1] relative", children: _jsx("button", { onClick: flip, className: "rounded-full flex items-center justify-center hover:opacity-90", style: { width: 28, height: 28, backgroundColor: '#5eccfa' }, "aria-label": "Swap tokens", children: _jsx("span", { role: "img", "aria-hidden": true, className: "block", style: {
                                     width: 16,
                                     height: 16,
                                     backgroundColor: '#ffffff',
@@ -256,7 +289,7 @@ export default function Swap() {
                                     WebkitMaskSize: 'contain',
                                     maskSize: 'contain',
                                     transform: 'rotate(90deg)',
-                                } }) }) }), _jsxs("div", { className: "card mt-1", children: [_jsxs("div", { className: "text-[11px] text-ink-dim mb-2", children: ["You receive ", quoting && _jsx("span", { className: "text-ink-faint", children: "\u00B7 quoting\u2026" })] }), _jsxs("div", { className: "flex items-center gap-2", children: [_jsx("div", { className: "flex-1 text-2xl font-semibold text-ink", children: quote ? Number(quote.amountOutDisplay).toLocaleString(undefined, { maximumFractionDigits: 3 }) : '—' }), _jsxs("button", { className: "flex items-center gap-2 bg-bg-soft border border-line rounded-xl px-2 py-2 hover:border-brand", onClick: () => setPickerFor('B'), children: [_jsx(TokenLogo, { token: tokenB, size: 24 }), _jsx("span", { className: "text-sm font-medium", children: tokenB.symbol.slice(0, 6) }), _jsx("span", { className: "text-ink-dim text-xs", children: "\u25BE" })] })] }), _jsxs("div", { className: "flex items-center justify-between mt-1 text-[11px] text-ink-faint", children: [_jsx("span", { children: outUsd != null ? `≈ $${outUsd}` : '' }), _jsx("span", { className: "font-bold", children: balB.toLocaleString(undefined, { maximumFractionDigits: 3 }) })] })] }), quoteErr && _jsx("div", { className: "text-danger text-xs mt-3", children: quoteErr }), _jsx("button", { className: "btn w-full mt-4 text-white bg-[#5eccfa] hover:bg-[#3eb8e8] disabled:opacity-60", disabled: !quote || submitting || !canQuote || overSpendable, onClick: doSwap, children: submitting
+                                } }) }) }), _jsxs("div", { className: "card mt-1", children: [_jsxs("div", { className: "text-[11px] text-ink-dim mb-2", children: ["You receive ", quoting && _jsx("span", { className: "text-ink-faint", children: "\u00B7 quoting\u2026" })] }), _jsxs("div", { className: "flex items-center gap-2", children: [_jsx("div", { className: "flex-1 font-semibold text-ink", style: { fontSize: 30 }, children: quote ? Number(quote.amountOutDisplay).toLocaleString(undefined, { maximumFractionDigits: 3 }) : '—' }), _jsxs("button", { className: "flex items-center gap-2 bg-bg-soft border border-line rounded-xl px-2 py-2 hover:border-brand", onClick: () => setPickerFor('B'), children: [_jsx(TokenLogo, { token: tokenB, size: 31 }), _jsx("span", { className: "font-bold", style: { fontSize: 16 }, children: tokenB.symbol.slice(0, 6) })] })] }), _jsxs("div", { className: "flex items-center justify-between mt-1 text-ink-faint", children: [_jsx("span", { style: { fontSize: 14 }, children: outUsd != null ? `≈ $${outUsd}` : '' }), _jsx("span", { className: "font-bold", style: { fontSize: 14 }, children: balB.toLocaleString(undefined, { maximumFractionDigits: 3 }) })] })] }), quoteErr && _jsx("div", { className: "text-danger text-xs mt-3", children: quoteErr }), _jsx("button", { className: "btn w-full mt-4 text-white font-bold bg-[#5eccfa] hover:bg-[#3eb8e8] disabled:opacity-60", style: { fontSize: 17 }, disabled: !quote || submitting || !canQuote || overSpendable, onClick: doSwap, children: submitting
                             ? 'Submitting…'
                             : overSpendable
                                 ? `Insufficient ${tokenA.symbol}`
@@ -264,24 +297,23 @@ export default function Swap() {
                                     ? 'Enter an amount'
                                     : !quote
                                         ? 'No route'
-                                        : 'Swap' }), quote && (_jsxs("div", { className: "card mt-3 space-y-1.5 text-xs", children: [_jsx(Row, { label: "Rate", value: `1 ${tokenA.symbol} ≈ ${quote.rate.toLocaleString(undefined, { maximumFractionDigits: 6 })} ${tokenB.symbol}` }), _jsx(Row, { label: "Slippage", value: `${(slippageBps / 100).toFixed(2)}%` }), _jsx(Row, { label: "Min received", value: `${minReceived ?? '—'} ${tokenB.symbol}` }), priceImpactPct != null && (_jsx(Row, { label: "Price impact", value: `${priceImpactPct.toFixed(2)}%`, tone: priceImpactPct > 5 ? 'warn' : priceImpactPct > 1 ? 'dim' : 'ok' })), _jsx(Row, { label: "Route", value: quote.direct ? 'Direct on Camelot' : 'Via WAPE on Camelot' }), _jsx(Row, { label: "Refreshes in", value: `${refreshSeconds}s`, muted: true })] })), _jsx(TokenPicker, { open: pickerFor !== null, onClose: () => setPickerFor(null), walletTokens: walletTokens, exclude: pickerFor === 'A' ? tokenB : tokenA, onPick: (t) => {
+                                        : 'Swap' }), quote && (_jsxs("div", { className: "card mt-3 space-y-1.5 text-xs", children: [_jsx(Row, { label: "Rate", value: `1 ${tokenA.symbol} ≈ ${quote.rate.toLocaleString(undefined, { maximumFractionDigits: 6 })} ${tokenB.symbol}` }), _jsx(Row, { label: `Yacht fee (${(quote.feeBps / 100).toFixed(2)}%)`, value: `${parseFloat(quote.feeAmountInDisplay).toLocaleString(undefined, { maximumFractionDigits: 6 })} ${tokenA.symbol}`, muted: true }), _jsx(Row, { label: "Slippage", value: `${(slippageBps / 100).toFixed(2)}%` }), _jsx(Row, { label: "Min received", value: `${minReceived ?? '—'} ${tokenB.symbol}` }), priceImpactPct != null && (_jsx(Row, { label: "Price impact", value: `${priceImpactPct.toFixed(2)}%`, tone: priceImpactPct > 5 ? 'warn' : priceImpactPct > 1 ? 'dim' : 'ok' })), _jsx(Row, { label: "Route", value: quote.direct ? 'Direct on Camelot' : 'Via WAPE on Camelot' }), _jsx(Row, { label: "Refreshes in", value: `${refreshSeconds}s`, muted: true })] })), _jsx(TokenPicker, { open: pickerFor !== null, onClose: () => setPickerFor(null), walletTokens: walletTokens, stats: pickerStats, exclude: pickerFor === 'A' ? tokenB : tokenA, onPick: (t) => {
                             if (pickerFor === 'A')
                                 setTokenA(t);
                             else if (pickerFor === 'B')
                                 setTokenB(t);
                             setPickerFor(null);
-                        } }), showSettings && (_jsx("div", { className: "fixed inset-0 bg-black/70 flex items-end z-30", onClick: () => setShowSettings(false), children: _jsxs("div", { className: "bg-bg-card border-t border-line w-full p-4 rounded-t-2xl", onClick: (e) => e.stopPropagation(), children: [_jsxs("div", { className: "flex items-center justify-between mb-3", children: [_jsx("h3", { className: "text-sm font-semibold", children: "Swap settings" }), _jsx("button", { onClick: () => setShowSettings(false), className: "text-ink-dim text-lg leading-none", children: "\u00D7" })] }), _jsx("div", { className: "text-xs text-ink-dim mb-2", children: "Slippage tolerance" }), _jsxs("div", { className: "grid grid-cols-5 gap-2 mb-3", children: [SLIPPAGE_OPTIONS.map((bps) => (_jsxs("button", { onClick: () => { setSlippageBps(bps); setCustomSlip(''); }, className: `py-2 rounded-xl border text-sm ${slippageBps === bps && !customSlip ? 'border-brand bg-brand/10 text-brand' : 'border-line bg-bg-soft text-ink'}`, children: [(bps / 100).toFixed(bps < 100 ? 1 : 0), "%"] }, bps))), _jsx("input", { className: "input text-sm", placeholder: "Custom", inputMode: "decimal", value: customSlip, onChange: (e) => {
+                        } }), showSettings && (_jsx("div", { className: "fixed inset-0 bg-black/70 flex items-end z-30", onClick: () => setShowSettings(false), children: _jsxs("div", { className: "bg-bg-card border-t border-line w-full p-4 rounded-t-2xl", onClick: (e) => e.stopPropagation(), children: [_jsxs("div", { className: "flex items-center justify-between mb-3", children: [_jsx("h3", { className: "font-bold", style: { fontSize: 24 }, children: "Slippage" }), _jsx("button", { onClick: () => setShowSettings(false), className: "text-ink-dim font-bold leading-none", style: { fontSize: 26 }, "aria-label": "Close", children: "\u00D7" })] }), _jsxs("div", { className: "grid grid-cols-5 gap-2 mb-3", children: [SLIPPAGE_OPTIONS.map((bps) => (_jsxs("button", { onClick: () => { setSlippageBps(bps); setCustomSlip(''); }, className: `py-2 rounded-xl border font-bold ${slippageBps === bps && !customSlip ? 'border-brand bg-brand/10 text-brand' : 'border-line bg-bg-soft text-ink'}`, style: { fontSize: 16 }, children: [(bps / 100).toFixed(bps < 100 ? 1 : 0), "%"] }, bps))), _jsx("input", { className: "input font-bold", style: { fontSize: 16 }, placeholder: "Custom", inputMode: "decimal", value: customSlip, onChange: (e) => {
                                                 setCustomSlip(e.target.value);
                                                 const n = parseFloat(e.target.value);
-                                                // Hard-cap custom slippage at 5% to limit MEV exposure;
-                                                // matches the background MAX_SLIPPAGE_BPS.
                                                 if (!Number.isNaN(n) && n > 0 && n <= 5)
                                                     setSlippageBps(Math.round(n * 100));
-                                            } })] }), slippageBps >= 300 && (_jsxs("div", { className: "text-danger text-xs mb-3", children: ["High slippage (", (slippageBps / 100).toFixed(2), "%) \u2014 your trade may be sandwiched by MEV bots."] })), _jsx("button", { className: "btn-primary w-full", onClick: () => setShowSettings(false), children: "Done" })] }) }))] }), _jsx(BottomNav, {}), txStatus !== 'idle' && (_jsx(TxStatus, { status: txStatus, message: txMessage, onDismiss: () => {
-                    const wasSuccess = txStatus === 'success';
+                                            } })] }), slippageBps >= 300 && (_jsxs("div", { className: "text-danger text-xs mb-3", children: ["High slippage (", (slippageBps / 100).toFixed(2), "%) \u2014 your trade may be sandwiched by MEV bots."] })), _jsx("button", { className: "btn w-full text-white font-bold bg-[#5eccfa] hover:bg-[#3eb8e8]", onClick: () => setShowSettings(false), children: "Done" })] }) }))] }), _jsx(BottomNav, {}), txStatus !== 'idle' && (_jsx(TxStatus, { status: txStatus, message: txMessage, onDismiss: () => {
+                    // Stay on the Swap menu so the user can swap again immediately.
+                    // Reset the input so they're not staring at the last amount.
                     setTxStatus('idle');
-                    if (wasSuccess)
-                        nav('/');
+                    setAmountIn('');
+                    setQuote(null);
                 } }))] }));
 }
 function trimZeros(s) {

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useLocation } from 'react-router-dom';
 import { Page, Screen, TopBar } from '../components/Layout';
 import { TokenLogo } from '../components/TokenLogo';
 import { TokenPicker } from '../components/TokenPicker';
@@ -15,9 +15,12 @@ const FEE_BUFFER_APE = 0.01;     // tiny buffer for gas (ApeChain gas is cheap)
 
 export default function Send() {
   const nav = useNavigate();
+  const loc = useLocation();
   const { meta } = useApp();
   const active = meta?.publicAccounts.find((a) => a.id === meta?.activeAccountId);
-  const [token, setToken] = useState<TokenMeta>(APE);
+  // Optional preselected token forwarded from /token/:address (Send button).
+  const presetToken = (loc.state as { token?: TokenMeta } | null)?.token;
+  const [token, setToken] = useState<TokenMeta>(presetToken ?? APE);
   const [to, setTo] = useState('');
   const [amount, setAmount] = useState('');
   const [pickerOpen, setPickerOpen] = useState(false);
@@ -143,20 +146,46 @@ export default function Send() {
 
   const overSpendable = parseFloat(amount || '0') > spendable;
 
+  async function pasteFromClipboard() {
+    // Manifest declares "clipboardRead" so navigator.clipboard.readText()
+    // works inside the popup. We still wrap in try/catch in case the popup
+    // momentarily lacks focus.
+    try {
+      const text = await navigator.clipboard.readText();
+      if (text) {
+        setTo(text.trim());
+        return;
+      }
+    } catch { /* fall through */ }
+    // Fallback: focus the address field so the user can Cmd/Ctrl+V manually.
+    const input = document.querySelector<HTMLInputElement>('input[placeholder="0x…"]');
+    if (input) input.focus();
+  }
+
   return (
     <Screen>
       <TopBar title="Send" />
       <Page>
-        <label className="label">To</label>
+        <div className="flex items-center justify-between">
+          <label className="label !mb-0">To</label>
+          <button
+            onClick={pasteFromClipboard}
+            className="px-3 py-1 rounded-lg text-white font-bold hover:opacity-90"
+            style={{ fontSize: 12, backgroundColor: '#f6c87e' }}
+          >
+            Paste
+          </button>
+        </div>
         <input
-          className="input font-mono text-xs"
+          className="w-full bg-white border-0 rounded-xl px-3 py-2.5 mt-1.5 font-mono font-bold text-ink placeholder:text-ink-faint focus:outline-none"
+          style={{ fontSize: 13 }}
           value={to}
           onChange={(e) => setTo(e.target.value)}
           placeholder="0x…"
         />
 
         <label className="label mt-3">Amount</label>
-        <div className="card !p-3 !rounded-xl">
+        <div className="bg-bg-card rounded-xl p-3">
           <div className="flex items-center gap-2">
             <input
               className="bg-transparent flex-1 text-2xl font-semibold focus:outline-none w-0 min-w-0"
@@ -199,13 +228,10 @@ export default function Send() {
           </div>
         )}
 
-        <p className="text-[11px] text-ink-faint mt-3">
-          On ApeChain, native APE pays gas. Make sure to leave a small APE balance to cover the fee.
-        </p>
-
         {err && <div className="text-danger text-xs mt-2">{err}</div>}
         <button
-          className="btn-primary w-full mt-4"
+          className="btn w-full mt-4 text-white font-bold bg-[#5eccfa] hover:bg-[#3eb8e8] disabled:opacity-60"
+          style={{ fontSize: 17 }}
           disabled={busy || !to || !amount || overSpendable}
           onClick={submit}
         >

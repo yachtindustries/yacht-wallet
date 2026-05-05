@@ -1,6 +1,6 @@
 {
   "name": "yacht",
-  "version": "0.1.1",
+  "version": "0.1.3",
   "private": true,
   "description": "Yacht — self-custody ApeChain browser extension wallet",
   "type": "module",
@@ -13,7 +13,9 @@
     "preview": "vite preview",
     "typecheck": "tsc -b --noEmit",
     "package": "npm run build && node scripts/package.mjs",
-    "validate": "node scripts/validate-store-package.mjs"
+    "validate": "node scripts/validate-store-package.mjs",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "dependencies": {
     "@fontsource/roboto": "^5.2.10",
@@ -36,6 +38,7 @@
     "postcss": "^8.4.49",
     "tailwindcss": "^3.4.15",
     "typescript": "^5.6.3",
-    "vite": "^5.4.11"
+    "vite": "^5.4.11",
+    "vitest": "^2.1.9"
   }
 }

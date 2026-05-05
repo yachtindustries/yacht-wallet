@@ -1,6 +1,6 @@
 import { Link } from 'react-router-dom';
 
-const logoUrl = chrome.runtime.getURL('public/logo.png');
+const logoUrl = chrome.runtime.getURL('yacht-icon.png');
 
 export default function Welcome() {
   return (
@@ -13,7 +13,7 @@ export default function Welcome() {
       </div>
 
       <div className="flex-1 flex flex-col items-center" style={{ paddingTop: '10%' }}>
-        <img src={logoUrl} alt="Yacht" style={{ width: 250, height: 250 }} />
+        <img src={logoUrl} alt="Yacht" className="object-contain" style={{ width: 250, height: 250 }} />
       </div>
 
       <div className="flex flex-col items-center gap-2 mb-[10%]">

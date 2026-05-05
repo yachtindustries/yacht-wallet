@@ -4,7 +4,7 @@
 **ApeChain** (chain id 33139). This policy explains what data the Extension
 handles and what it does *not* do.
 
-_Last updated: 2026-05-02_
+_Last updated: 2026-05-04_
 
 ## Summary
 
@@ -42,7 +42,7 @@ The Extension only contacts the following endpoints, and only when needed:
 
 | Endpoint | When | Purpose |
 | --- | --- | --- |
-| `https://rpc.apechain.com` | Whenever balances, history, swaps, or transactions are needed | ApeChain JSON-RPC |
+| `https://rpc.apechain.com` and `https://apechain.calderachain.xyz/http` | Whenever balances, history, swaps, or transactions are needed | ApeChain JSON-RPC (the wallet falls over to the second endpoint if the first is unreachable) |
 | `https://api.etherscan.io/v2/api?chainid=33139` | Loading transaction history and NFT ownership | ApeChain transaction / ERC-721 transfer indexing via Etherscan V2 |
 | `https://api.dexscreener.com` | Token discovery, prices, 24h change | Public DEX data |
 | `https://api.coingecko.com` | Periodic APE price fetch | Display fiat conversions |
@@ -58,6 +58,8 @@ endpoint.
 | --- | --- |
 | `storage` | Save your encrypted vault and settings locally; mirror unlocked state into `chrome.storage.session` so the wallet stays unlocked across MV3 service-worker restarts |
 | `alarms` | Auto-lock the wallet after a period of inactivity |
+| `sidePanel` | Optional Chrome side-panel layout — toggle from the Dashboard to pin the wallet to the side of the browser instead of opening as a floating popup. No data leaves the wallet in either mode. |
+| `clipboardRead` | Powers the "paste recipient address" button on the Send screen, and reads the clipboard back after a sensitive copy (recovery phrase / private key) so the wallet can clear it. The wallet never reads the clipboard without a direct user action. |
 | `host_permissions: <all_urls>` | Inject the `window.yacht` / `window.ethereum` provider so any website you visit can request to connect to your wallet (you must approve each site, and approval is per-origin and revocable) |
 
 ## What the Extension does *not* do

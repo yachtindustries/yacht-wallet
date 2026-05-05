@@ -8,7 +8,11 @@ export interface Network {
   label: string;
   chainId: number;
   chainIdHex: string;
-  rpcUrl: string;
+  // Ordered list of RPC endpoints. The first is the primary; on transport
+  // failure (network error, 5xx, timeout) the wallet retries the next one.
+  // Configuring more than one is the only thing standing between a single
+  // provider's outage and every Yacht user seeing "balance: $0".
+  rpcUrls: string[];
   nativeSymbol: string;
   nativeDecimals: number;
   explorerUrl: string;
@@ -30,7 +34,10 @@ export const NETWORKS: Record<NetworkId, Network> = {
     label: 'ApeChain',
     chainId: 33139,
     chainIdHex: '0x8173',
-    rpcUrl: 'https://rpc.apechain.com',
+    rpcUrls: [
+      'https://rpc.apechain.com',
+      'https://apechain.calderachain.xyz/http',
+    ],
     nativeSymbol: 'APE',
     nativeDecimals: 18,
     explorerUrl: 'https://apescan.io',

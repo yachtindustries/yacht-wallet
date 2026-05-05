@@ -13,7 +13,7 @@ npm run package
 npm run validate
 ```
 
-You should end up with `dist-zip/yacht-v0.1.0.zip` (the version comes from
+You should end up with `dist-zip/yacht-v0.1.3.zip` (the version comes from
 `package.json`). The validator checks for: missing manifest fields, oversized
 bundle, missing icons, source-map leaks, and a present privacy policy.
 
@@ -77,7 +77,7 @@ Brand colours: water `#5eccfa`, deck `#f6c87e`. Logo at `public/logo.png`.
 ## 6. Create the item
 
 1. Go to https://chrome.google.com/webstore/devconsole
-2. **New item** → upload `dist-zip/yacht-v0.1.0.zip`
+2. **New item** → upload `dist-zip/yacht-v0.1.3.zip`
 3. Wait for the upload to verify (a few seconds).
 4. Fill in the listing — see fields below.
 
@@ -102,6 +102,15 @@ Copy/paste-ready:
   for the password every minute. No data is transmitted."
 - **`alarms`** — "Auto-lock the wallet after a configurable period of
   inactivity (default 15 minutes)."
+- **`sidePanel`** — "Optional Chrome side-panel mode so users who prefer the
+  wallet pinned to the side of the browser (instead of a floating popup)
+  can toggle into that layout. Toggle is fully user-controlled from the
+  Dashboard; no behaviour changes when in side-panel mode."
+- **`clipboardRead`** — "Used by the 'paste recipient address' button on the
+  Send screen, and to read back the clipboard after the user copies a
+  sensitive value (recovery phrase, private key) so the wallet can clear it
+  again after a short timeout. The wallet never reads the clipboard without
+  a direct user action."
 - **`host_permissions: <all_urls>`** — "Required to inject the
   `window.yacht` / `window.ethereum` provider on the dApps the user visits,
   so ApeChain dApps can request a connection (each connection requires

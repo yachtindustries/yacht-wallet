@@ -43,7 +43,8 @@ export default defineManifest({
       matches: ['<all_urls>'],
     },
   ],
-  permissions: ['storage', 'alarms'],
+  permissions: ['storage', 'alarms', 'sidePanel', 'clipboardRead'],
+  side_panel: { default_path: 'index.html?sidepanel=1' },
   host_permissions: ['<all_urls>'],
   icons: {
     '16': 'public/icon-16.png',
@@ -58,7 +59,12 @@ export default defineManifest({
       "style-src 'self' 'unsafe-inline'",
       "img-src 'self' data: https:",
       "font-src 'self' data:",
-      "connect-src 'self' https://rpc.apechain.com https://apechain.calderachain.xyz https://apechain.calderaexplorer.xyz https://apechain-mainnet.g.alchemy.com https://api.apescan.io https://api.etherscan.io https://api.dexscreener.com https://api.coingecko.com https://ipfs.io https://gateway.pinata.cloud https://cloudflare-ipfs.com https://nftstorage.link https://arweave.net",
+      // Wallet RPC/dex endpoints + an open https:// allowance for NFT
+      // metadata. NFT contracts return arbitrary metadata URLs; locking
+      // connect-src to a fixed gateway list blocks most NFT image loads.
+      // Yacht stores no secrets that can be exfiltrated to a third-party
+      // host — every fetch is for a public address or a public token URI.
+      "connect-src 'self' https: wss:",
       "frame-src https://dexscreener.com",
       "object-src 'none'",
       "base-uri 'self'",

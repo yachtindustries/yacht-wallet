@@ -4,7 +4,7 @@ This document describes Yacht's threat model — what the wallet defends
 against, what it does **not** defend against, and what users and operators
 must do to use it safely.
 
-_Last updated: 2026-05-02_
+_Last updated: 2026-05-04_
 
 ## TL;DR for users
 
@@ -56,12 +56,15 @@ can only do so much; the items above are non-negotiable for production.
 | Slippage abuse | Swap execute path validates `slippageBps ∈ [0, 2000]` (max 20%) in the background. |
 | In-page provider response forgery | Inpage provider uses 128-bit cryptographically random message IDs. A page script that doesn't see the request cannot forge a matching reply. |
 | Cross-frame postMessage | Content script rejects messages whose `source !== window` or `origin !== window.location.origin`. |
-| Plaintext password leak | Password is held in service-worker memory only while unlocked, mirrored to `chrome.storage.session` (in-memory, never disk-flushed) so MV3 service-worker restarts don't force re-derivation. Auto-lock alarm wipes both. |
+| Plaintext password leak | The user's password is **never** mirrored. Only the derived AES-256 key bytes + KDF salt are kept in `chrome.storage.session` (in-memory, never disk-flushed). MV3 service-worker restarts rehydrate from this, re-arm the auto-lock alarm against the user's configured `autoLockMinutes`, and have an independent 1 h hard cap. Auto-lock alarm clears in-memory key, session blob, and pending submission queues. |
 | Atomic password change | Cached password is updated **after** vault rewrite succeeds. A wrong-password attempt cannot poison the cache. |
 | Per-origin popup spam | Maximum 3 pending dApp requests per origin. |
 | Per-origin RPC fingerprinting | Leaky-bucket RPC budget per origin (120 calls / minute). |
+| `eth_getLogs` / `eth_call` payload abuse | dApp passthrough validates parameters: `eth_getLogs` ranges over 10 000 blocks are rejected; `eth_call` calldata over 256 KB is rejected. Stateful filter methods (`eth_newFilter`, `eth_*FilterChanges`, etc.) are not in the passthrough whitelist. |
+| Single-RPC outage taking the wallet offline | `getProvider` wraps a primary + ordered fallback list of ApeChain RPCs and fails over on transport-layer error (network, timeout, 5xx). Application errors like `execution reverted` are passed through unchanged. |
+| White-screen mid-signing | The popup tree is wrapped in a React `ErrorBoundary` that surfaces a recovery card (with a Reload button) instead of a blank window. Stray async rejections in popup and SW are logged via `unhandledrejection` listeners. |
 | Generic error leakage | Errors returned to dApps are sanitised — no stack traces, no internal field names. |
-| Remote code execution via CSP | Strict `extension_pages` CSP: `script-src 'self'` only, no `unsafe-eval`, no `unsafe-inline`. `connect-src` is scoped to ApeChain RPC + Etherscan + DexScreener + CoinGecko + a handful of public IPFS/Arweave gateways for NFT metadata. `object-src 'none'`. |
+| Remote code execution via CSP | Strict `extension_pages` CSP: `script-src 'self'` only, no `unsafe-eval`, no `unsafe-inline`. `object-src 'none'`. `base-uri 'self'`. `form-action 'none'`. `connect-src 'self' https: wss:` is intentionally broader than the read-only allowlist would be — NFT contracts return arbitrary `tokenURI` hosts, and pinning a fixed list breaks images for any future token. The wallet never POSTs vault material outbound; the only outbound traffic is the JSON-RPC and metadata reads listed in PRIVACY.md. We document this trade-off here so the broader `connect-src` is not mistaken for an oversight. |
 | Third-party script supply chain | Roboto font is bundled (`@fontsource/roboto`); no Google Fonts CDN. No remote scripts at runtime. |
 | IDN homograph dApps | Connect popup flags non-ASCII / punycode hostnames. |
 

@@ -16,6 +16,7 @@ import Settings from './screens/Settings';
 import Accounts from './screens/Accounts';
 import ConnectedSites from './screens/ConnectedSites';
 import RequestApproval from './screens/RequestApproval';
+import Chat from './screens/Chat';
 
 export default function App() {
   const { initialized, unlocked, refreshStatus, refreshSettings } = useApp();
@@ -64,6 +65,7 @@ export default function App() {
       <Route path="/search" element={<SearchScreen />} />
       <Route path="/token/:address" element={<TokenDetail />} />
       <Route path="/history" element={<History />} />
+      <Route path="/chat" element={<Chat />} />
       <Route path="/settings" element={<Settings />} />
       <Route path="/settings/sites" element={<ConnectedSites />} />
       <Route path="/accounts" element={<Accounts />} />

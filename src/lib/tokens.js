@@ -26,8 +26,36 @@ export const CURTIS = {
     decimals: 18,
     verified: true,
 };
+export const BLUE = {
+    symbol: 'BLUE',
+    name: 'Blue',
+    address: '0x2C7A31a9b44Cd9c485314008B3F638758E6A8470',
+    decimals: 18,
+    verified: true,
+};
+export const MURTIS = {
+    symbol: 'MURTIS',
+    name: 'Murtis',
+    address: '0xB0a563dDd67237E1c8a0995C432d879fA3ecd6FE',
+    decimals: 18,
+    verified: true,
+};
+export const WONG = {
+    symbol: 'WONG',
+    name: 'Wong',
+    address: '0xd6e4DF460D9ba104Dfc5Dc57DB392c177083d20c',
+    decimals: 18,
+    verified: true,
+};
+export const PNUTZ = {
+    symbol: 'PNutz',
+    name: 'PNutz',
+    address: '0x54A70516e9c0223F4a92bE3a4832a06f546e783B',
+    decimals: 18,
+    verified: true,
+};
 // Curated list. Everything else shows up via DexScreener trending + search.
-export const TOP_TOKENS = [APE, CURTIS, WAPE];
+export const TOP_TOKENS = [APE, CURTIS, BLUE, MURTIS, WONG, PNUTZ, WAPE];
 export function isNative(t) {
     return !!t && (t.isNative === true || t.address === ZeroAddress);
 }

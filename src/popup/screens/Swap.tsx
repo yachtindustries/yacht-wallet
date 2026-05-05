@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useLocation } from 'react-router-dom';
 import { BottomNav, Page, Screen, TopBar } from '../components/Layout';
-import { TokenPicker } from '../components/TokenPicker';
+import { TokenPicker, TokenStats as PickerStats } from '../components/TokenPicker';
 import { TokenLogo } from '../components/TokenLogo';
 import { TxStatus } from '../components/TxStatus';
 import { useApp } from '../store';
@@ -11,6 +11,7 @@ import type { SwapQuote, SwapToken } from '@/lib/camelot';
 import { isNative, TokenMeta, APE, CURTIS, safeChecksum } from '@/lib/tokens';
 
 const TRACKED_TOKENS_KEY = 'yacht.trackedTokens.v1';
+const PICKER_STATS_KEY = 'yacht.pickerStats.v1';
 const SLIPPAGE_OPTIONS = [50, 100, 300, 500];
 const FEE_BUFFER_APE = 0.005;
 const swapIconUrl = chrome.runtime.getURL('public/actions/swap.png');
@@ -20,11 +21,14 @@ const settingsIconUrl = chrome.runtime.getURL('public/actions/settings.png');
 // dominant DEX on ApeChain so most listed ERC-20s have liquidity there.
 
 export default function Swap() {
-  const nav = useNavigate();
+  const loc = useLocation();
   const { meta } = useApp();
   const active = meta?.publicAccounts.find((a) => a.id === meta?.activeAccountId);
-  const [tokenA, setTokenA] = useState<TokenMeta>(APE);
-  const [tokenB, setTokenB] = useState<TokenMeta>(CURTIS);
+  // Optional preselection forwarded from /token/:address (Swap button).
+  const presetIn = (loc.state as { tokenIn?: TokenMeta } | null)?.tokenIn;
+  const presetOut = (loc.state as { tokenOut?: TokenMeta } | null)?.tokenOut;
+  const [tokenA, setTokenA] = useState<TokenMeta>(presetIn ?? APE);
+  const [tokenB, setTokenB] = useState<TokenMeta>(presetOut ?? CURTIS);
   const [amountIn, setAmountIn] = useState('');
   const [pickerFor, setPickerFor] = useState<'A' | 'B' | null>(null);
 
@@ -33,7 +37,7 @@ export default function Swap() {
   const [quoteErr, setQuoteErr] = useState<string | null>(null);
 
   const [showSettings, setShowSettings] = useState(false);
-  const [slippageBps, setSlippageBps] = useState(300);
+  const [slippageBps, setSlippageBps] = useState(100);
   const [customSlip, setCustomSlip] = useState('');
   const [refreshSeconds, setRefreshSeconds] = useState(0);
 
@@ -45,35 +49,62 @@ export default function Swap() {
   const [tokens, setTokens] = useState<Erc20Balance[]>([]);
   const [tokenAUsd, setTokenAUsd] = useState<number | null>(null);
   const [tokenBUsd, setTokenBUsd] = useState<number | null>(null);
+  const [pickerStats, setPickerStats] = useState<Record<string, PickerStats>>({});
+
+  // Read the dashboard's cached balances + prices once, so the TokenPicker
+  // can show them without firing any new network requests.
+  useEffect(() => {
+    chrome.storage.local.get(PICKER_STATS_KEY).then((r) => {
+      const v = r[PICKER_STATS_KEY] as Record<string, PickerStats> | undefined;
+      if (v) setPickerStats(v);
+    }).catch(() => {});
+  }, []);
 
   const debounceRef = useRef<number | null>(null);
   const refreshRef = useRef<number | null>(null);
 
-  useEffect(() => {
+  async function refreshBalances() {
     if (!active) return;
-    void (async () => {
-      const r = await chrome.storage.local.get(TRACKED_TOKENS_KEY);
-      const tracked: string[] = r[TRACKED_TOKENS_KEY] ?? [];
-      const [s, balances] = await Promise.all([
-        rpc({ type: 'evm.account', address: active.address }),
-        tracked.length
-          ? rpc({ type: 'evm.erc20.balances', tokens: tracked, address: active.address })
-          : Promise.resolve([] as Erc20Balance[]),
-      ]);
-      setSummary(s);
-      setTokens(balances);
-    })().catch(() => {});
+    const r = await chrome.storage.local.get(TRACKED_TOKENS_KEY);
+    const tracked: string[] = r[TRACKED_TOKENS_KEY] ?? [];
+    const [s, balances] = await Promise.all([
+      rpc({ type: 'evm.account', address: active.address }),
+      tracked.length
+        ? rpc({ type: 'evm.erc20.balances', tokens: tracked, address: active.address })
+        : Promise.resolve([] as Erc20Balance[]),
+    ]);
+    setSummary(s);
+    setTokens(balances);
+  }
+
+  useEffect(() => {
+    void refreshBalances().catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [active?.address]);
 
   useEffect(() => {
-    const q = isNative(tokenA) ? 'apecoin' : tokenA.address;
-    rpc({ type: 'dex.token', query: q })
+    if (isNative(tokenA)) {
+      // dex.token('apecoin') doesn't reliably return an APE-priced ApeChain
+      // pair (APE is the native gas token; pools are TOKEN/WAPE). Use the
+      // dedicated CoinGecko-backed price.get route for APE.
+      rpc({ type: 'price.get' })
+        .then((p) => setTokenAUsd(p?.usd ?? null))
+        .catch(() => setTokenAUsd(null));
+      return;
+    }
+    rpc({ type: 'dex.token', query: tokenA.address })
       .then((p) => setTokenAUsd(p?.priceUsd ? parseFloat(p.priceUsd) : null))
       .catch(() => setTokenAUsd(null));
   }, [tokenA.address]);
 
   useEffect(() => {
-    const q = isNative(tokenB) ? 'apecoin' : tokenB.address;
+    if (isNative(tokenB)) {
+      rpc({ type: 'price.get' })
+        .then((p) => setTokenBUsd(p?.usd ?? null))
+        .catch(() => setTokenBUsd(null));
+      return;
+    }
+    const q = tokenB.address;
     rpc({ type: 'dex.token', query: q })
       .then((p) => setTokenBUsd(p?.priceUsd ? parseFloat(p.priceUsd) : null))
       .catch(() => setTokenBUsd(null));
@@ -213,6 +244,9 @@ export default function Swap() {
         if (!isNative(tokenB)) await trackToken(tokenB.address);
         setTxStatus('success');
         setTxMessage(`Swapped ${tokenA.symbol} → ${tokenB.symbol}`);
+        // Refresh balances so Pay/Receive boxes reflect the new amounts
+        // immediately, instead of forcing the user to reopen the screen.
+        void refreshBalances().catch(() => {});
       } else {
         setTxStatus('error');
         setTxMessage('Swap reverted');
@@ -259,8 +293,8 @@ export default function Swap() {
               aria-hidden
               className="block"
               style={{
-                width: 26,
-                height: 26,
+                width: 20,
+                height: 20,
                 backgroundColor: '#ffffff',
                 WebkitMaskImage: `url(${settingsIconUrl})`,
                 maskImage: `url(${settingsIconUrl})`,
@@ -311,7 +345,8 @@ export default function Swap() {
           </div>
           <div className="flex items-center gap-2">
             <input
-              className="bg-transparent flex-1 text-2xl font-semibold focus:outline-none w-0 min-w-0"
+              className="bg-transparent flex-1 font-semibold focus:outline-none w-0 min-w-0"
+              style={{ fontSize: 30 }}
               inputMode="decimal"
               value={amountIn}
               onChange={(e) => setAmountIn(e.target.value)}
@@ -321,14 +356,15 @@ export default function Swap() {
               className="flex items-center gap-2 bg-bg-soft border border-line rounded-xl px-2 py-2 hover:border-brand"
               onClick={() => setPickerFor('A')}
             >
-              <TokenLogo token={tokenA} size={24} />
-              <span className="text-sm font-medium">{tokenA.symbol.slice(0, 6)}</span>
-              <span className="text-ink-dim text-xs">▾</span>
+              <TokenLogo token={tokenA} size={31} />
+              <span className="font-bold" style={{ fontSize: 16 }}>{tokenA.symbol.slice(0, 6)}</span>
             </button>
           </div>
-          <div className="flex items-center justify-between mt-1 text-[11px]">
-            <span className="text-ink-faint">{inUsd != null ? `≈ $${inUsd}` : ''}</span>
-            <span className={`font-bold ${overSpendable ? 'text-danger' : 'text-ink-faint'}`}>
+          <div className="flex items-center justify-between mt-1">
+            <span className="text-ink-faint" style={{ fontSize: 14 }}>
+              {inUsd != null ? `≈ $${inUsd}` : ''}
+            </span>
+            <span className={`font-bold ${overSpendable ? 'text-danger' : 'text-ink-faint'}`} style={{ fontSize: 14 }}>
               {spendableA.toLocaleString(undefined, { maximumFractionDigits: 3 })}
             </span>
           </div>
@@ -373,28 +409,28 @@ export default function Swap() {
             You receive {quoting && <span className="text-ink-faint">· quoting…</span>}
           </div>
           <div className="flex items-center gap-2">
-            <div className="flex-1 text-2xl font-semibold text-ink">
+            <div className="flex-1 font-semibold text-ink" style={{ fontSize: 30 }}>
               {quote ? Number(quote.amountOutDisplay).toLocaleString(undefined, { maximumFractionDigits: 3 }) : '—'}
             </div>
             <button
               className="flex items-center gap-2 bg-bg-soft border border-line rounded-xl px-2 py-2 hover:border-brand"
               onClick={() => setPickerFor('B')}
             >
-              <TokenLogo token={tokenB} size={24} />
-              <span className="text-sm font-medium">{tokenB.symbol.slice(0, 6)}</span>
-              <span className="text-ink-dim text-xs">▾</span>
+              <TokenLogo token={tokenB} size={31} />
+              <span className="font-bold" style={{ fontSize: 16 }}>{tokenB.symbol.slice(0, 6)}</span>
             </button>
           </div>
-          <div className="flex items-center justify-between mt-1 text-[11px] text-ink-faint">
-            <span>{outUsd != null ? `≈ $${outUsd}` : ''}</span>
-            <span className="font-bold">{balB.toLocaleString(undefined, { maximumFractionDigits: 3 })}</span>
+          <div className="flex items-center justify-between mt-1 text-ink-faint">
+            <span style={{ fontSize: 14 }}>{outUsd != null ? `≈ $${outUsd}` : ''}</span>
+            <span className="font-bold" style={{ fontSize: 14 }}>{balB.toLocaleString(undefined, { maximumFractionDigits: 3 })}</span>
           </div>
         </div>
 
         {quoteErr && <div className="text-danger text-xs mt-3">{quoteErr}</div>}
 
         <button
-          className="btn w-full mt-4 text-white bg-[#5eccfa] hover:bg-[#3eb8e8] disabled:opacity-60"
+          className="btn w-full mt-4 text-white font-bold bg-[#5eccfa] hover:bg-[#3eb8e8] disabled:opacity-60"
+          style={{ fontSize: 17 }}
           disabled={!quote || submitting || !canQuote || overSpendable}
           onClick={doSwap}
         >
@@ -412,6 +448,11 @@ export default function Swap() {
         {quote && (
           <div className="card mt-3 space-y-1.5 text-xs">
             <Row label="Rate" value={`1 ${tokenA.symbol} ≈ ${quote.rate.toLocaleString(undefined, { maximumFractionDigits: 6 })} ${tokenB.symbol}`} />
+            <Row
+              label={`Yacht fee (${(quote.feeBps / 100).toFixed(2)}%)`}
+              value={`${parseFloat(quote.feeAmountInDisplay).toLocaleString(undefined, { maximumFractionDigits: 6 })} ${tokenA.symbol}`}
+              muted
+            />
             <Row label="Slippage" value={`${(slippageBps / 100).toFixed(2)}%`} />
             <Row label="Min received" value={`${minReceived ?? '—'} ${tokenB.symbol}`} />
             {priceImpactPct != null && (
@@ -430,6 +471,7 @@ export default function Swap() {
           open={pickerFor !== null}
           onClose={() => setPickerFor(null)}
           walletTokens={walletTokens}
+          stats={pickerStats}
           exclude={pickerFor === 'A' ? tokenB : tokenA}
           onPick={(t) => {
             if (pickerFor === 'A') setTokenA(t);
@@ -442,40 +484,53 @@ export default function Swap() {
           <div className="fixed inset-0 bg-black/70 flex items-end z-30" onClick={() => setShowSettings(false)}>
             <div className="bg-bg-card border-t border-line w-full p-4 rounded-t-2xl" onClick={(e) => e.stopPropagation()}>
               <div className="flex items-center justify-between mb-3">
-                <h3 className="text-sm font-semibold">Swap settings</h3>
-                <button onClick={() => setShowSettings(false)} className="text-ink-dim text-lg leading-none">×</button>
+                <h3 className="font-bold" style={{ fontSize: 24 }}>Slippage</h3>
+                <button
+                  onClick={() => setShowSettings(false)}
+                  className="text-ink-dim font-bold leading-none"
+                  style={{ fontSize: 26 }}
+                  aria-label="Close"
+                >
+                  ×
+                </button>
               </div>
-              <div className="text-xs text-ink-dim mb-2">Slippage tolerance</div>
               <div className="grid grid-cols-5 gap-2 mb-3">
                 {SLIPPAGE_OPTIONS.map((bps) => (
                   <button
                     key={bps}
                     onClick={() => { setSlippageBps(bps); setCustomSlip(''); }}
-                    className={`py-2 rounded-xl border text-sm ${
+                    className={`py-2 rounded-xl border font-bold ${
                       slippageBps === bps && !customSlip ? 'border-brand bg-brand/10 text-brand' : 'border-line bg-bg-soft text-ink'
                     }`}
+                    style={{ fontSize: 16 }}
                   >
                     {(bps / 100).toFixed(bps < 100 ? 1 : 0)}%
                   </button>
                 ))}
                 <input
-                  className="input text-sm"
+                  className="input font-bold"
+                  style={{ fontSize: 16 }}
                   placeholder="Custom"
                   inputMode="decimal"
                   value={customSlip}
                   onChange={(e) => {
                     setCustomSlip(e.target.value);
                     const n = parseFloat(e.target.value);
-                    // Hard-cap custom slippage at 5% to limit MEV exposure;
-                    // matches the background MAX_SLIPPAGE_BPS.
                     if (!Number.isNaN(n) && n > 0 && n <= 5) setSlippageBps(Math.round(n * 100));
                   }}
                 />
               </div>
               {slippageBps >= 300 && (
-                <div className="text-danger text-xs mb-3">High slippage ({(slippageBps / 100).toFixed(2)}%) — your trade may be sandwiched by MEV bots.</div>
+                <div className="text-danger text-xs mb-3">
+                  High slippage ({(slippageBps / 100).toFixed(2)}%) — your trade may be sandwiched by MEV bots.
+                </div>
               )}
-              <button className="btn-primary w-full" onClick={() => setShowSettings(false)}>Done</button>
+              <button
+                className="btn w-full text-white font-bold bg-[#5eccfa] hover:bg-[#3eb8e8]"
+                onClick={() => setShowSettings(false)}
+              >
+                Done
+              </button>
             </div>
           </div>
         )}
@@ -486,9 +541,11 @@ export default function Swap() {
           status={txStatus}
           message={txMessage}
           onDismiss={() => {
-            const wasSuccess = txStatus === 'success';
+            // Stay on the Swap menu so the user can swap again immediately.
+            // Reset the input so they're not staring at the last amount.
             setTxStatus('idle');
-            if (wasSuccess) nav('/');
+            setAmountIn('');
+            setQuote(null);
           }}
         />
       )}

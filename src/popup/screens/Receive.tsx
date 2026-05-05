@@ -2,31 +2,61 @@ import { useEffect, useState } from 'react';
 import QRCode from 'qrcode';
 import { Page, Screen, TopBar } from '../components/Layout';
 import { useApp } from '../store';
-import { CopyButton } from '../components/Copy';
+
+const QR_SIZE = 240;
 
 export default function Receive() {
   const { meta } = useApp();
   const active = meta?.publicAccounts.find((a) => a.id === meta?.activeAccountId);
   const [qr, setQr] = useState<string>('');
+  const [copied, setCopied] = useState(false);
 
   useEffect(() => {
     if (!active) return;
-    QRCode.toDataURL(active.address, { margin: 1, width: 220, color: { dark: '#f3e9da', light: '#1c130a' } }).then(setQr);
+    QRCode.toDataURL(active.address, {
+      margin: 1,
+      width: QR_SIZE,
+      color: { dark: '#ffffff', light: '#f6c87e' },
+    }).then(setQr);
   }, [active?.address]);
+
+  async function copy() {
+    if (!active) return;
+    await navigator.clipboard.writeText(active.address);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1500);
+  }
 
   if (!active) return null;
   return (
     <Screen>
-      <TopBar title="Receive" />
-      <Page className="flex flex-col items-center text-center">
-        <div className="card flex flex-col items-center w-full">
-          {qr && <img src={qr} alt="address QR" className="rounded-xl" />}
-          <div className="font-mono text-xs mt-3 break-all select-all">{active.address}</div>
-          <div className="mt-2"><CopyButton text={active.address} label="Copy address" /></div>
+      <TopBar title="Receive" tone="deck" />
+      <Page tone="deck" className="flex flex-col items-center text-center">
+        <div className="flex flex-col items-center" style={{ width: QR_SIZE }}>
+          {qr && <img src={qr} alt="address QR" />}
+          <button
+            type="button"
+            onClick={copy}
+            className="bg-white rounded-xl px-3 py-3 break-all font-bold w-full text-center hover:opacity-90"
+            style={{ marginTop: '20%', fontSize: 16, color: '#f6c87e' }}
+            aria-label="Copy address"
+            title="Click to copy"
+          >
+            {active.address}
+          </button>
+          <button
+            onClick={copy}
+            className="mt-3 px-6 py-2 rounded-xl bg-[#5eccfa] hover:bg-[#3eb8e8] text-white font-bold w-full"
+            style={{ fontSize: 15 }}
+          >
+            {copied ? 'Copied!' : 'Copy'}
+          </button>
         </div>
-        <p className="text-xs text-ink-faint mt-4 max-w-[280px]">
-          Only send APE and ApeChain (chain id 33139) ERC-20 tokens to this address.
-          Sending tokens from another chain will result in lost funds.
+        <p
+          className="text-white mt-auto pt-4 font-bold"
+          style={{ fontSize: 12 }}
+        >
+          Only Send ApeChain Tokens to this Address
         </p>
       </Page>
     </Screen>

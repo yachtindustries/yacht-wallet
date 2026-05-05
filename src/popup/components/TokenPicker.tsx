@@ -1,8 +1,17 @@
 import { useEffect, useMemo, useState } from 'react';
 import { isNative, searchTokens, TokenMeta, tokenKey, TOP_TOKENS, safeChecksum } from '@/lib/tokens';
 import { rpc } from '@/lib/messaging';
-import { isValidEvmAddress, shortAddress } from '@/lib/wallet-utils';
+import { shortAddress } from '@/lib/wallet-utils';
 import { TokenLogo } from './TokenLogo';
+
+const verifiedIconUrl = chrome.runtime.getURL('verified.png');
+
+export interface TokenStats {
+  /** Display-units balance, e.g. "12.345" */
+  balance?: string;
+  /** Per-token USD price */
+  priceUsd?: number;
+}
 
 interface Props {
   open: boolean;
@@ -11,15 +20,19 @@ interface Props {
   /** Tokens the user already holds — usually the dashboard ERC-20 list. */
   walletTokens?: TokenMeta[];
   exclude?: TokenMeta;
+  /**
+   * Cached balances + USD prices keyed by token (NATIVE for APE, lower-case
+   * address for ERC-20). Pass the dashboard's already-fetched data so we
+   * don't hit the API again from inside the picker.
+   */
+  stats?: Record<string, TokenStats>;
 }
 
-export function TokenPicker({ open, onClose, onPick, walletTokens = [], exclude }: Props) {
+export function TokenPicker({ open, onClose, onPick, walletTokens = [], exclude, stats = {} }: Props) {
   const [query, setQuery] = useState('');
   const [trending, setTrending] = useState<TokenMeta[]>([]);
   const [searchHits, setSearchHits] = useState<TokenMeta[]>([]);
   const [searching, setSearching] = useState(false);
-  const [pasteAddr, setPasteAddr] = useState('');
-  const [pasteErr, setPasteErr] = useState<string | null>(null);
 
   // Top trending ApeChain tokens via DexScreener
   useEffect(() => {
@@ -93,23 +106,6 @@ export function TokenPicker({ open, onClose, onPick, walletTokens = [], exclude 
     return { top, yours, trend, hits };
   }, [query, trending, walletTokens, searchHits, exclude]);
 
-  function tryAddPasted() {
-    setPasteErr(null);
-    try {
-      if (!isValidEvmAddress(pasteAddr.trim())) throw new Error('Invalid contract address');
-      const addr = safeChecksum(pasteAddr.trim());
-      onPick({
-        symbol: 'TOKEN',
-        name: 'Custom token',
-        address: addr,
-        decimals: 18,
-      });
-      setPasteAddr('');
-    } catch (e) {
-      setPasteErr((e as Error).message);
-    }
-  }
-
   const totalResults =
     sections.top.length + sections.yours.length + sections.trend.length + sections.hits.length;
 
@@ -122,13 +118,14 @@ export function TokenPicker({ open, onClose, onPick, walletTokens = [], exclude 
       >
         <div className="p-4 border-b border-line">
           <div className="flex items-center justify-between mb-3">
-            <h3 className="text-sm font-semibold">Select a token</h3>
-            <button onClick={onClose} className="text-ink-dim text-lg leading-none">×</button>
+            <h3 className="font-bold" style={{ fontSize: 18 }}>Select a token</h3>
+            <button onClick={onClose} className="text-ink-dim leading-none" style={{ fontSize: 22 }}>×</button>
           </div>
           <input
             autoFocus
             className="input"
-            placeholder="Symbol, name, or paste contract (0x…)"
+            style={{ fontSize: 16 }}
+            placeholder="Search Tokens"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
           />
@@ -136,75 +133,96 @@ export function TokenPicker({ open, onClose, onPick, walletTokens = [], exclude 
 
         <div className="flex-1 overflow-y-auto p-2">
           {sections.top.length > 0 && (
-            <Section title="Top tokens" tokens={sections.top} onPick={onPick} />
+            <Section title="Top tokens" tokens={sections.top} onPick={onPick} stats={stats} />
           )}
           {sections.yours.length > 0 && (
-            <Section title="Your tokens" tokens={sections.yours} onPick={onPick} />
+            <Section title="Your tokens" tokens={sections.yours} onPick={onPick} stats={stats} />
           )}
           {sections.hits.length > 0 && (
-            <Section title="From DexScreener" tokens={sections.hits} onPick={onPick} />
+            <Section title="From DexScreener" tokens={sections.hits} onPick={onPick} stats={stats} />
           )}
           {sections.trend.length > 0 && (
-            <Section title="🔥 Trending on ApeChain" tokens={sections.trend} onPick={onPick} />
+            <Section title="🔥 Trending on ApeChain" tokens={sections.trend} onPick={onPick} stats={stats} />
           )}
 
           {searching && totalResults === 0 && (
-            <div className="text-center text-ink-dim text-sm py-6">Searching DexScreener…</div>
+            <div className="text-center text-ink-dim py-6" style={{ fontSize: 16 }}>Searching DexScreener…</div>
           )}
           {!searching && totalResults === 0 && (
-            <div className="text-center text-ink-dim text-sm py-6">
-              No matches. Paste the contract address below.
+            <div className="text-center text-ink-dim py-6" style={{ fontSize: 16 }}>
+              No matches.
             </div>
           )}
-        </div>
-
-        <div className="p-4 border-t border-line">
-          <details>
-            <summary className="text-xs text-ink-dim cursor-pointer">Add by contract address</summary>
-            <div className="mt-2 space-y-2">
-              <input
-                className="input font-mono text-xs"
-                placeholder="0x…"
-                value={pasteAddr}
-                onChange={(e) => setPasteAddr(e.target.value)}
-              />
-              {pasteErr && <div className="text-danger text-xs">{pasteErr}</div>}
-              <button className="btn-ghost w-full" onClick={tryAddPasted}>
-                Use this token
-              </button>
-              <p className="text-[10px] text-ink-faint">
-                Only add contracts you trust. Verify the address on the explorer first.
-              </p>
-            </div>
-          </details>
         </div>
       </div>
     </div>
   );
 }
 
-function Section({ title, tokens, onPick }: { title: string; tokens: TokenMeta[]; onPick: (t: TokenMeta) => void }) {
+function Section({
+  title,
+  tokens,
+  onPick,
+  stats,
+}: {
+  title: string;
+  tokens: TokenMeta[];
+  onPick: (t: TokenMeta) => void;
+  stats: Record<string, TokenStats>;
+}) {
   return (
     <>
-      <div className="text-[10px] uppercase tracking-wider text-ink-faint px-3 mt-2 mb-1">{title}</div>
-      {tokens.map((t) => (
-        <button
-          key={tokenKey(t)}
-          onClick={() => onPick(t)}
-          className="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl hover:bg-bg-soft text-left"
-        >
-          <TokenLogo token={t} size={32} />
-          <div className="flex-1 min-w-0">
-            <div className="flex items-center gap-2">
-              <span className="font-medium">{t.symbol}</span>
-              {t.verified && <span className="text-[10px] text-brand">✓</span>}
+      <div
+        className="uppercase tracking-wider text-ink-faint px-3 mt-2 mb-1"
+        style={{ fontSize: 13 }}
+      >
+        {title}
+      </div>
+      {tokens.map((t) => {
+        const k = tokenKey(t);
+        const s = stats[k];
+        const balN = s?.balance ? parseFloat(s.balance) : null;
+        const usd =
+          balN != null && s?.priceUsd != null && s.priceUsd > 0 ? balN * s.priceUsd : null;
+        return (
+          <button
+            key={k}
+            onClick={() => onPick(t)}
+            className="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl hover:bg-bg-soft text-left"
+          >
+            <TokenLogo token={t} size={42} />
+            <div className="flex-1 min-w-0">
+              <div className="flex items-center gap-1.5">
+                <span className="font-bold" style={{ fontSize: 16 }}>{t.symbol}</span>
+                {t.verified && (
+                  <img
+                    src={verifiedIconUrl}
+                    alt="Verified"
+                    title="Verified"
+                    className="inline-block"
+                    style={{ width: 14, height: 14 }}
+                  />
+                )}
+              </div>
+              <div className="text-ink-faint truncate" style={{ fontSize: 13 }}>
+                {t.name} {!isNative(t) && <span className="font-mono">· {shortAddress(t.address)}</span>}
+              </div>
             </div>
-            <div className="text-[11px] text-ink-faint truncate">
-              {t.name} {!isNative(t) && <span className="font-mono">· {shortAddress(t.address)}</span>}
-            </div>
-          </div>
-        </button>
-      ))}
+            {balN != null && balN > 0 && (
+              <div className="text-right shrink-0">
+                <div className="font-bold" style={{ fontSize: 14 }}>
+                  {balN.toLocaleString(undefined, { maximumFractionDigits: 3 })}
+                </div>
+                {usd != null && (
+                  <div className="text-ink-faint" style={{ fontSize: 12 }}>
+                    ${usd.toLocaleString(undefined, { maximumFractionDigits: 2, minimumFractionDigits: 2 })}
+                  </div>
+                )}
+              </div>
+            )}
+          </button>
+        );
+      })}
     </>
   );
 }

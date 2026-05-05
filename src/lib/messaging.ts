@@ -5,6 +5,7 @@ import type { VaultAccount, VaultMeta } from './vault';
 import type { AccountSummary, Erc20Balance, Erc20Info, HistoryEntry, OwnedNft, SendResult } from './evm';
 import type { SwapQuote, SwapToken } from './camelot';
 import type { DexPair } from './dexscreener';
+import type { ChatMessage } from './chat';
 
 export interface UnsignedEvmTx {
   to?: string;
@@ -69,19 +70,24 @@ export type RpcRequest =
   | { type: 'price.get' }
   | { type: 'dex.token'; query: string }
   | { type: 'dex.trending'; limit?: number }
+  | { type: 'chat.send'; account: string; text: string }
+  | { type: 'chat.list'; limit?: number }
   // dApp-originated. Origin is omitted: the background derives it from sender.
   | { type: 'dapp.connect' }
   | { type: 'dapp.getAddress' }
   | { type: 'dapp.signTx'; tx: UnsignedEvmTx }
   | { type: 'dapp.personalSign'; message: string }
   | { type: 'dapp.signTypedData'; payload: TypedDataPayload }
+  | { type: 'dapp.rpc'; method: string; params: unknown }
   // popup → background:
   | { type: 'request.approve'; id: string }
   | { type: 'request.reject'; id: string; error: string }
   | { type: 'request.list' }
   | { type: 'request.get'; id: string }
   | { type: 'origins.list' }
-  | { type: 'origins.revoke'; origin: string };
+  | { type: 'origins.revoke'; origin: string }
+  | { type: 'layout.get' }
+  | { type: 'layout.set'; mode: 'popup' | 'sidepanel' };
 
 export interface RpcResponseMap {
   'vault.status': { initialized: boolean; unlocked: boolean; meta: VaultMeta };
@@ -117,17 +123,22 @@ export interface RpcResponseMap {
   'price.get': { usd: number; eur: number; gbp: number; ts: number };
   'dex.token': DexPair | null;
   'dex.trending': DexPair[];
+  'chat.send': SendResult;
+  'chat.list': ChatMessage[];
   'dapp.connect': { address: string; chainId: string };
   'dapp.getAddress': { address: string; chainId: string; network: NetworkId };
   'dapp.signTx': SendResult;
   'dapp.personalSign': { signature: string };
   'dapp.signTypedData': { signature: string };
+  'dapp.rpc': unknown;
   'request.approve': { ok: true };
   'request.reject': { ok: true };
   'request.list': PendingRequest[];
   'request.get': PendingRequest | null;
   'origins.list': string[];
   'origins.revoke': { ok: true };
+  'layout.get': { mode: 'popup' | 'sidepanel' };
+  'layout.set': { ok: true };
 }
 
 export type PendingRequestType = 'connect' | 'signTx' | 'personalSign' | 'signTypedData';

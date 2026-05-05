@@ -3,7 +3,7 @@ import { Screen } from '../components/Layout';
 import { rpc } from '@/lib/messaging';
 import { useApp } from '../store';
 
-const logoUrl = chrome.runtime.getURL('public/logo.png');
+const logoUrl = chrome.runtime.getURL('yacht-icon.png');
 
 export default function Unlock() {
   const { refreshStatus } = useApp();
@@ -37,7 +37,7 @@ export default function Unlock() {
         </div>
 
         <div className="flex-1 flex flex-col items-center" style={{ paddingTop: '10%' }}>
-          <img src={logoUrl} alt="Yacht" className="mb-6" style={{ width: 250, height: 250 }} />
+          <img src={logoUrl} alt="Yacht" className="mb-6 object-contain" style={{ width: 250, height: 250 }} />
           <input
             autoFocus
             className="w-full max-w-xs rounded-xl px-3 py-3 text-center font-bold bg-white text-ink placeholder:text-ink-faint border border-white focus:outline-none focus:ring-2 focus:ring-white"
