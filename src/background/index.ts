@@ -38,6 +38,7 @@ import {
   personalSign,
   sendErc20,
   sendNative,
+  sendNft,
   signGenericTransaction,
   signTypedDataV4,
   simulateTransaction,
@@ -49,7 +50,7 @@ import {
   isNativeAddress,
   quoteSwap,
 } from '@/lib/camelot';
-import { parseUnits } from 'ethers';
+import { formatUnits, parseUnits } from 'ethers';
 import {
   deriveAccount,
   generateMnemonic,
@@ -59,7 +60,30 @@ import {
 import { NETWORKS, readSettings, writeSettings } from '@/lib/networks';
 import { getApePrice } from '@/lib/price';
 import { getApeChainPair, getTrendingApeChainTokens } from '@/lib/dexscreener';
-import { getRecentMessages, sendChatMessage } from '@/lib/chat';
+import {
+  getRecentMessages,
+  getTipsForMessages,
+  releaseTipBudget,
+  reserveTipBudget,
+  sendChatMessage,
+  sendTip,
+} from '@/lib/chat';
+import { castVote, getVoteTalliesForWeek, VOTE_AMOUNTS } from '@/lib/voting';
+import { setOnChainPfp, clearOnChainPfp, getOnChainPfp } from '@/lib/pfp';
+import { getRecentTrades } from '@/lib/trades';
+import { getTopNftCollections, TOP_NFT_REGISTRY } from '@/lib/topnfts';
+import { getCollectionListings, getCollectionTraits, getFulfillmentTx, getCollectionFloorByContract, getNftDetailByContract, OPENSEA_APECHAIN } from '@/lib/opensea';
+import { TRADING_FEE_TREASURY } from '@/lib/constants';
+import { getTopUsers } from '@/lib/topusers';
+import {
+  evaluateRankForAddress,
+  readAchievementSnapshot,
+  recordOpenseaConnect,
+  recordOpenseaNftPurchase,
+  recordRevokedSite,
+  syncAchievements,
+} from '@/lib/achievements';
+import { getOrCreateUsername, setUsername } from '@/lib/usernames';
 import { friendlyError } from '@/lib/errors';
 import { assessTxRisk, hostFromOrigin } from '@/lib/security';
 import {
@@ -105,6 +129,10 @@ function uuid(): string {
 }
 
 async function setAutoLockAlarm(): Promise<void> {
+  // On mobile we lock-on-background instead (see src/lib/mobile-rpc.ts).
+  // Running the timer-based alarm in the foreground would lock the wallet
+  // mid-session, which broke swap flows for active users.
+  if ((import.meta as any).env?.YACHT_PLATFORM === 'mobile') return;
   const settings = await readSettings();
   await chrome.alarms.clear(AUTO_LOCK_ALARM);
   if (settings.autoLockMinutes > 0) {
@@ -115,11 +143,42 @@ async function setAutoLockAlarm(): Promise<void> {
 chrome.alarms.onAlarm.addListener((a) => {
   if (a.name === AUTO_LOCK_ALARM) {
     lock();
-    cachedKey = null;
+    clearCachedKey();
     submissionQueues.clear();
     void clearSession();
   }
 });
+
+// Audit H3: force-lock on every install / update event. The Trust
+// Wallet extension breach (Dec 2025, ~$7M) used the auto-update
+// channel to push code that ran against an already-unlocked vault.
+// We forbid that pattern by design: any extension reload — install,
+// reinstall, browser update, our own version bump — drops the
+// in-memory and chrome.storage.session unlocked state, requiring the
+// user to re-enter the password. The Argon2id cost is the user's
+// only line of defense if the publish channel is ever compromised.
+chrome.runtime.onInstalled.addListener((details) => {
+  if (details.reason === 'install' || details.reason === 'update' || details.reason === 'chrome_update') {
+    lock();
+    clearCachedKey();
+    submissionQueues.clear();
+    void clearSession();
+  }
+});
+
+// `onUpdateAvailable` fires when Chrome has a pending update for our
+// extension; calling reload would apply it immediately. We don't
+// reload here (we let Chrome do it on its own schedule) but we DO
+// drop the unlocked state proactively so the moment the update lands
+// the new code starts from "locked".
+if (chrome.runtime.onUpdateAvailable) {
+  chrome.runtime.onUpdateAvailable.addListener(() => {
+    lock();
+    clearCachedKey();
+    submissionQueues.clear();
+    void clearSession();
+  });
+}
 
 void loadApprovedOrigins();
 
@@ -232,6 +291,23 @@ function rateLimitOrigin(origin: string): void {
   b.tokens -= 1;
 }
 
+// ───────────────────── PFP set/clear cooldown ───────────────────────────
+// One PFP publish every 60 s per account. Blocks a popup-XSS from
+// spam-publishing PFP changes (gas drain only — the on-chain
+// ownership check in pfp.ts already prevents impersonation).
+const PFP_COOLDOWN_MS = 60_000;
+const lastPfpAtByAccount = new Map<string, number>();
+function enforcePfpCooldown(account: string): void {
+  const lc = account.toLowerCase();
+  const last = lastPfpAtByAccount.get(lc) ?? 0;
+  const elapsed = Date.now() - last;
+  if (elapsed < PFP_COOLDOWN_MS) {
+    const wait = Math.ceil((PFP_COOLDOWN_MS - elapsed) / 1000);
+    throw new Error(`PFP changes are rate-limited; try again in ${wait}s.`);
+  }
+  lastPfpAtByAccount.set(lc, Date.now());
+}
+
 // ───────────────────── per-account submission mutex ──────────────────────
 const submissionQueues = new Map<string, Promise<unknown>>();
 
@@ -287,6 +363,14 @@ function safeError(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }
 
+/** True for opensea.io and any of its subdomains (testnets.opensea.io,
+ * pro.opensea.io, etc.). Used to drive the opensea-* achievements. */
+function isOpenseaHost(host: string): boolean {
+  if (!host) return false;
+  const h = host.toLowerCase();
+  return h === 'opensea.io' || h.endsWith('.opensea.io');
+}
+
 // Mirror unlocked vault into chrome.storage.session so MV3 service-worker
 // terminations don't appear to "lock" the wallet every minute. session storage
 // lives in browser-process RAM; it never touches disk and is wiped on browser
@@ -298,7 +382,7 @@ function safeError(e: unknown): string {
 // in memory after unlock. The password is needed only for changePassword,
 // which the user re-enters as input.
 const SESSION_KEY = 'yacht.session.v1';
-const SESSION_GRACE_MS = 60 * 60 * 1000; // 1h hard cap regardless of alarm fate
+const SESSION_GRACE_MS = 20 * 60 * 1000; // 20m hard cap regardless of alarm fate
 
 interface SessionBlob {
   v: 2;                 // schema version (v1 is the legacy password-bearing format)
@@ -310,6 +394,26 @@ interface SessionBlob {
 }
 
 let cachedKey: { bytes: Uint8Array; salt: Uint8Array } | null = null;
+
+/**
+ * Zero the cached AES key + salt bytes in place before clearing the
+ * reference. JS doesn't guarantee garbage-collected memory is wiped,
+ * so a heap dump after lock could otherwise still recover the key
+ * bytes from the freed Uint8Array's backing buffer.
+ *
+ * .fill(0) is required by every modern wallet's threat model
+ * (MetaMask, Phantom both do this); skipping it would weaken the
+ * post-lock memory hygiene we advertise in SECURITY.md.
+ */
+function clearCachedKey(): void {
+  if (cachedKey) {
+    try {
+      cachedKey.bytes.fill(0);
+      cachedKey.salt.fill(0);
+    } catch { /* defensive — bytes/salt should always be writable */ }
+  }
+  cachedKey = null;
+}
 
 async function writeSession(): Promise<void> {
   if (!state.unlocked || !cachedKey) return;
@@ -381,6 +485,9 @@ async function rehydrateFromSession(): Promise<void> {
     }
     state.unlocked = blob.unlocked;
     state.unlockedAt = blob.unlockedAt;
+    // Wipe any stale key bytes from a previous unlock cycle before we
+    // overwrite the reference with fresh material.
+    clearCachedKey();
     cachedKey = {
       bytes: fromB64(blob.keyB64),
       salt: fromB64(blob.saltB64),
@@ -395,7 +502,7 @@ async function rehydrateFromSession(): Promise<void> {
     // If anything throws, fail closed (treat as locked).
     state.unlocked = null;
     state.unlockedAt = 0;
-    cachedKey = null;
+    clearCachedKey();
   }
 }
 function ensureRehydrated(): Promise<void> {
@@ -405,6 +512,7 @@ function ensureRehydrated(): Promise<void> {
 async function rememberUnlockedAndLoad(material: UnlockMaterial) {
   state.unlocked = material.data;
   state.unlockedAt = Date.now();
+  clearCachedKey();
   cachedKey = { bytes: material.keyBytes, salt: material.salt };
   await writeSession();
   void setAutoLockAlarm();
@@ -432,6 +540,14 @@ async function openApprovalPopup(opts: {
   type: 'connect' | 'signTx' | 'personalSign' | 'signTypedData';
   origin: string;
   payload: unknown;
+  /** Audit H2: the account this request is bound to, captured at
+   * dispatch time. The approval flow signs with EXACTLY this account
+   * — never with whatever's "currently active". Prevents the
+   * account-confusion drain where a user reviews a tx for Account A
+   * and then (accidentally or maliciously) has the active account
+   * flipped to Account B before clicking Approve, sending Account
+   * B's key against Account A's payload. */
+  accountId?: string;
   /** Window ID of the dApp tab that initiated the request, used to anchor
    * the popup. Avoids the chrome.windows.getLastFocused TOCTOU where a
    * malicious site could grab focus to position the real popup over a
@@ -451,6 +567,7 @@ async function openApprovalPopup(opts: {
       origin: opts.origin,
       createdAt: Date.now(),
       payload: opts.payload,
+      accountId: opts.accountId,
       resolve: async (v) => {
         if (opts.type === 'connect') {
           state.approvedOrigins.add(opts.origin);
@@ -459,6 +576,13 @@ async function openApprovalPopup(opts: {
           // personal_sign) reads from disk faster than we wrote, and finds
           // the origin missing → "Origin not connected" → SIWE 401.
           try { await persistApprovedOrigins(); } catch { /* best effort */ }
+          // Achievement signal: connect-opensea fires on the first
+          // approved connect to opensea.io (or any *.opensea.io
+          // subdomain). The recording is per-account.
+          if (isOpenseaHost(hostFromOrigin(opts.origin))) {
+            const a = getActiveAccount();
+            if (a) void recordOpenseaConnect(a.address);
+          }
         }
         resolve(v);
       },
@@ -551,7 +675,71 @@ function newDerivedAccount(name?: string): VaultAccount {
 
 // ───────────────────── handlers ──────────────────────────────────────────
 
-async function handle(req: RpcRequest, sender: chrome.runtime.MessageSender | undefined): Promise<unknown> {
+// Audit H1: popup-only RPCs must originate from the wallet's own
+// extension page (popup or side-panel HTML), not from a content
+// script. The base `fromExtension` check passes for both — content
+// scripts of *our* extension also report sender.id === runtime.id —
+// so without this list a malicious page that gets a content-script
+// to forward arbitrary RpcEnvelopes could silently call e.g.
+// `request.approve` or `vault.mnemonic.reveal`. The expected sender
+// URL is the popup HTML; everything else is dApp-bridge traffic.
+const POPUP_ONLY_RPCS = new Set<RpcRequest['type']>([
+  'vault.create.new',
+  'vault.create.mnemonic',
+  'vault.create.privateKey',
+  'vault.unlock',
+  'vault.lock',
+  'vault.account.add.derived',
+  'vault.account.add.privateKey',
+  'vault.account.rename',
+  'vault.account.remove',
+  'vault.account.activate',
+  'vault.account.reveal',
+  'vault.mnemonic.reveal',
+  'vault.changePassword',
+  'vault.destroy',
+  'request.approve',
+  'request.reject',
+  'request.list',
+  'request.get',
+  'origins.list',
+  'origins.revoke',
+  'layout.set',
+  'layout.get',
+  // Popup-only outbound flows that move funds. dApp-side equivalents
+  // run through dapp.signTx (which opens the approval popup); these
+  // RPCs are the popup's own Send / Swap / Chat / Tip path and must
+  // never be reachable from a content-script context.
+  'evm.send.native',
+  'evm.send.erc20',
+  'evm.send.nft',
+  'evm.sign.tx',
+  'evm.sign.message',
+  'evm.sign.typedData',
+  'swap.execute',
+  'chat.send',
+  'chat.tip',
+  'username.set',
+  // nft.vote moves user funds (APE → treasury) on a popup-side
+  // gesture; gate it the same way as chat.tip.
+  'nft.vote',
+  // nft.buy fans through OpenSea + signs a Seaport tx. Popup-only —
+  // never reachable from a content-script context.
+  'nft.buy',
+  // pfp.set / pfp.clear publish on-chain. Popup-only — same model
+  // as chat.send / chat.tip.
+  'pfp.set',
+  'pfp.clear',
+]);
+
+function isFromPopupSurface(sender: chrome.runtime.MessageSender | undefined): boolean {
+  const url = sender?.url ?? '';
+  if (!url) return false;
+  const expected = chrome.runtime.getURL('index.html');
+  return url.startsWith(expected);
+}
+
+export async function handle(req: RpcRequest, sender: chrome.runtime.MessageSender | undefined): Promise<unknown> {
   // After an MV3 service-worker restart, in-memory unlocked state is gone but
   // we may still have a valid session blob — rehydrate before any handler runs.
   await ensureRehydrated();
@@ -561,6 +749,15 @@ async function handle(req: RpcRequest, sender: chrome.runtime.MessageSender | un
 
   if (!fromExtension) {
     throw new Error('Unauthorized sender');
+  }
+
+  // Audit H1: popup-only RPCs must originate from the popup/sidepanel
+  // HTML. dApp RPCs (req.type starts with 'dapp.') are exempt — those
+  // come through the content script.
+  if (POPUP_ONLY_RPCS.has(req.type)) {
+    if (!isFromPopupSurface(sender)) {
+      throw new Error('Unauthorized sender for popup-only RPC');
+    }
   }
 
   switch (req.type) {
@@ -650,7 +847,7 @@ async function handle(req: RpcRequest, sender: chrome.runtime.MessageSender | un
 
     case 'vault.lock': {
       lock();
-      cachedKey = null;
+      clearCachedKey();
       submissionQueues.clear();
       await clearSession();
       return { ok: true };
@@ -711,20 +908,50 @@ async function handle(req: RpcRequest, sender: chrome.runtime.MessageSender | un
     }
 
     case 'vault.account.reveal': {
-      const { data } = await unlockVault(req.password);
+      // Audit M4: gate reveal flows behind the same brute-force
+      // counter as `vault.unlock`. Without this, a popup-XSS could
+      // grind the password against the reveal RPC at full Argon2id
+      // cost forever, since the unlock-screen lockout never fires
+      // for this code path.
+      const gateAR = await unlockTryAllowed();
+      if (!gateAR.allowed) {
+        throw new Error(`Too many failed attempts. Try again in ${Math.ceil(gateAR.waitMs / 1000)}s.`);
+      }
+      let data;
+      try {
+        ({ data } = await unlockVault(req.password));
+        unlockSucceeded();
+      } catch {
+        unlockFailed();
+        throw new Error('Incorrect password');
+      }
       const a = data.accounts.find((x) => x.id === req.id);
       if (!a) throw new Error('Account not found');
       return { privateKey: a.privateKey };
     }
 
     case 'vault.mnemonic.reveal': {
-      const { data } = await unlockVault(req.password);
+      // Audit M4: gate behind the brute-force counter — see
+      // vault.account.reveal above for the same reason.
+      const gateMR = await unlockTryAllowed();
+      if (!gateMR.allowed) {
+        throw new Error(`Too many failed attempts. Try again in ${Math.ceil(gateMR.waitMs / 1000)}s.`);
+      }
+      let data;
+      try {
+        ({ data } = await unlockVault(req.password));
+        unlockSucceeded();
+      } catch {
+        unlockFailed();
+        throw new Error('Incorrect password');
+      }
       return { mnemonic: data.mnemonic };
     }
 
     case 'vault.changePassword': {
       const fresh = await changePassword(req.oldPw, req.newPw);
       // Atomically swap in the new key material so the next persist uses it.
+      clearCachedKey();
       cachedKey = { bytes: fresh.keyBytes, salt: fresh.salt };
       state.unlocked = fresh.data;
       await writeSession();
@@ -732,16 +959,28 @@ async function handle(req: RpcRequest, sender: chrome.runtime.MessageSender | un
     }
 
     case 'vault.destroy': {
+      // Audit M4: same brute-force gate. Destroying the vault is
+      // not in itself a fund-loss path (the user's mnemonic on
+      // paper still recovers it), but routing reveal/destroy
+      // password checks through the same counter prevents an
+      // attacker from using THIS endpoint as an oracle to learn
+      // whether a candidate password is correct.
+      const gateD = await unlockTryAllowed();
+      if (!gateD.allowed) {
+        throw new Error(`Too many failed attempts. Try again in ${Math.ceil(gateD.waitMs / 1000)}s.`);
+      }
       try {
         await unlockVault(req.password);
+        unlockSucceeded();
       } catch {
+        unlockFailed();
         throw new Error('Incorrect password');
       }
       // Wipe session FIRST so the in-memory key material is gone before the
       // user-visible destroy completes; otherwise a SW kill in this window
       // leaves a vault-less state with key material still in session.
       await clearSession();
-      cachedKey = null;
+      clearCachedKey();
       lock();
       await destroyVault();
       state.approvedOrigins.clear();
@@ -792,6 +1031,24 @@ async function handle(req: RpcRequest, sender: chrome.runtime.MessageSender | un
       try {
         return await submitSerialized(acct.address, () =>
           sendErc20(settings.network, acct.privateKey, req.token, req.to, req.amount),
+        );
+      } catch (e) {
+        throw new Error(friendlyError(e));
+      }
+    }
+
+    case 'evm.send.nft': {
+      await requireUnlocked();
+      const settings = await readSettings();
+      const acct = findAccount(req.from);
+      // Basic shape validation. Full address validity is enforced
+      // again in evm.ts, but failing fast here gives a friendlier
+      // error before we even hit the queue.
+      if (!/^0x[0-9a-fA-F]{40}$/.test(req.contract)) throw new Error('Invalid NFT contract');
+      if (!/^0x[0-9a-fA-F]{40}$/.test(req.to)) throw new Error('Invalid recipient address');
+      try {
+        return await submitSerialized(acct.address, () =>
+          sendNft(settings.network, acct.privateKey, req.contract, req.tokenId, req.to),
         );
       } catch (e) {
         throw new Error(friendlyError(e));
@@ -891,10 +1148,341 @@ async function handle(req: RpcRequest, sender: chrome.runtime.MessageSender | un
     case 'chat.send': {
       await requireUnlocked();
       const acct = findAccount(req.account);
+      // Hard-bind to the active account: any caller-supplied address that
+      // isn't the currently-active wallet is rejected. Blocks a
+      // hypothetical popup-XSS from posting/tipping out of dormant
+      // accounts the user isn't looking at.
+      const active = getActiveAccount();
+      if (!active || active.address.toLowerCase() !== acct.address.toLowerCase()) {
+        throw new Error('Chat actions are limited to the active account');
+      }
       const settings = await readSettings();
+      // Embed the sender's Yacht username so other Yacht clients can render
+      // it in place of the raw EOA address.
+      const username = await getOrCreateUsername(acct.id).catch(() => undefined);
       return await submitSerialized(acct.address, () =>
-        sendChatMessage(settings.network, acct.privateKey, req.text),
+        sendChatMessage(settings.network, acct.privateKey, req.text, username),
       );
+    }
+    case 'chat.tip': {
+      await requireUnlocked();
+      const acct = findAccount(req.account);
+      // See chat.send — same restriction. Defends against caller-supplied
+      // dormant-account abuse if the popup-side gets compromised.
+      const active = getActiveAccount();
+      if (!active || active.address.toLowerCase() !== acct.address.toLowerCase()) {
+        throw new Error('Chat actions are limited to the active account');
+      }
+      const settings = await readSettings();
+      // Refuse to tip yourself — silly, wastes gas, and would inflate own
+      // message totals on display.
+      if (acct.address.toLowerCase() === req.toAuthor.toLowerCase()) {
+        throw new Error('Cannot tip your own message');
+      }
+      // Reserve against the wallet's daily tip budget BEFORE submitting the
+      // tx. If the on-chain transfer reverts we refund the budget so a
+      // failed attempt doesn't burn the user's tip allowance for the day.
+      const acctLc = acct.address.toLowerCase();
+      const apeWei = parseUnits(req.apeAmount, 18);
+      await reserveTipBudget(acctLc, apeWei);
+      try {
+        return await submitSerialized(acct.address, () =>
+          sendTip(settings.network, acct.privateKey, req.toAuthor, req.messageHash, req.apeAmount),
+        );
+      } catch (e) {
+        await releaseTipBudget(acctLc, apeWei);
+        throw e;
+      }
+    }
+    case 'chat.tips': {
+      const settings = await readSettings();
+      return await getTipsForMessages(settings.network, req.entries);
+    }
+
+    // ───────────────────── ranks / achievements ─────────────────────
+    case 'achievements.snapshot': {
+      return await readAchievementSnapshot(req.address);
+    }
+    case 'achievements.sync': {
+      const settings = await readSettings();
+      return await syncAchievements(settings.network, req.address, { force: req.force });
+    }
+
+    case 'username.get': {
+      const u = await getOrCreateUsername(req.accountId);
+      return { username: u };
+    }
+    case 'username.set': {
+      const u = await setUsername(req.accountId, req.username);
+      return { username: u };
+    }
+    case 'rank.get': {
+      const settings = await readSettings();
+      return await evaluateRankForAddress(settings.network, req.address, { force: req.force });
+    }
+
+    // ───────────────────── NFT discovery / voting ─────────────────────
+    case 'nft.topcollections': {
+      const settings = await readSettings();
+      return await getTopNftCollections(settings.network);
+    }
+    case 'nft.listings': {
+      const lc = req.contract.toLowerCase();
+      const entry = TOP_NFT_REGISTRY.find((e) => e.contract.toLowerCase() === lc);
+      if (!entry) throw new Error('Collection is not in the Top NFTs list');
+      const price = await getApePrice().catch(() => null);
+      const limit = Math.min(50, Math.max(1, req.limit ?? 30));
+      return await getCollectionListings(entry.slug, {
+        limit,
+        apeUsd: price?.usd ?? 0,
+        cursor: req.cursor,
+      });
+    }
+
+    case 'nft.collectionFloor': {
+      if (!/^0x[0-9a-fA-F]{40}$/.test(req.contract)) throw new Error('Invalid contract');
+      return await getCollectionFloorByContract(OPENSEA_APECHAIN, req.contract);
+    }
+    case 'nft.detail': {
+      if (!/^0x[0-9a-fA-F]{40}$/.test(req.contract)) throw new Error('Invalid contract');
+      return await getNftDetailByContract(OPENSEA_APECHAIN, req.contract, req.tokenId);
+    }
+
+    case 'pfp.set': {
+      await requireUnlocked();
+      const acct = findAccount(req.account);
+      const active = getActiveAccount();
+      if (!active || active.address.toLowerCase() !== acct.address.toLowerCase()) {
+        throw new Error('PFP changes are limited to the active account');
+      }
+      // Audit M14: rate-limit PFP publishes to one per 60 s per
+      // account. Defends against a popup-XSS spam-publishing PFP
+      // changes to drain the user's gas.
+      enforcePfpCooldown(acct.address);
+      const settings = await readSettings();
+      try {
+        return await submitSerialized(acct.address, () =>
+          setOnChainPfp(settings.network, acct.privateKey, req.contract, req.tokenId),
+        );
+      } catch (e) {
+        throw new Error(friendlyError(e));
+      }
+    }
+
+    case 'pfp.clear': {
+      await requireUnlocked();
+      const acct = findAccount(req.account);
+      const active = getActiveAccount();
+      if (!active || active.address.toLowerCase() !== acct.address.toLowerCase()) {
+        throw new Error('PFP changes are limited to the active account');
+      }
+      enforcePfpCooldown(acct.address);
+      const settings = await readSettings();
+      try {
+        return await submitSerialized(acct.address, () =>
+          clearOnChainPfp(settings.network, acct.privateKey),
+        );
+      } catch (e) {
+        throw new Error(friendlyError(e));
+      }
+    }
+
+    case 'pfp.get': {
+      const settings = await readSettings();
+      return await getOnChainPfp(settings.network, req.address, { force: req.force });
+    }
+
+    case 'dex.recentTrades': {
+      const settings = await readSettings();
+      if (!/^0x[0-9a-fA-F]{40}$/.test(req.pairAddress)) throw new Error('Invalid pair address');
+      if (!/^0x[0-9a-fA-F]{40}$/.test(req.baseTokenAddress)) throw new Error('Invalid base token');
+      return await getRecentTrades(
+        settings.network,
+        req.pairAddress,
+        req.baseTokenAddress,
+        req.baseDecimals ?? 18,
+        req.quoteDecimals ?? 18,
+        { limit: req.limit ?? 30 },
+      );
+    }
+
+    case 'nft.collectionTraits': {
+      const lc = req.contract.toLowerCase();
+      const entry = TOP_NFT_REGISTRY.find((e) => e.contract.toLowerCase() === lc);
+      if (!entry) throw new Error('Collection is not in the Top NFTs list');
+      return await getCollectionTraits(entry.slug);
+    }
+
+    case 'users.top': {
+      const settings = await readSettings();
+      return await getTopUsers(settings.network, { force: req.force });
+    }
+
+    case 'tokens.top': {
+      const settings = await readSettings();
+      const limit = Math.min(50, Math.max(1, req.limit ?? 30));
+      const [trending, tallies] = await Promise.all([
+        getTrendingApeChainTokens(limit),
+        getVoteTalliesForWeek(settings.network),
+      ]);
+      const merged = trending.map((p) => {
+        const lc = (p.baseToken?.address ?? '').toLowerCase();
+        const t = lc ? tallies[lc] : undefined;
+        return { ...p, apeVoted: t?.apeTotal ?? 0, voteCount: t?.voteCount ?? 0 };
+      });
+      // Rank by APE voted desc; FDV (mcap proxy) breaks ties so the
+      // chunky tokens settle above the long tail of zero-vote rows.
+      merged.sort((a, b) => {
+        if (b.apeVoted !== a.apeVoted) return b.apeVoted - a.apeVoted;
+        return (b.fdv ?? b.marketCap ?? 0) - (a.fdv ?? a.marketCap ?? 0);
+      });
+      return merged;
+    }
+
+    case 'nft.buy': {
+      await requireUnlocked();
+      const acct = findAccount(req.account);
+      const active = getActiveAccount();
+      if (!active || active.address.toLowerCase() !== acct.address.toLowerCase()) {
+        throw new Error('Buy is limited to the active account');
+      }
+      // Validate the listing's contract is in this wallet's allowed
+      // collection list. Any contract not in the Top NFTs registry
+      // is rejected — defence against the popup tricking us into
+      // buying from an attacker collection.
+      const lc = String(req.contract ?? '').toLowerCase();
+      const entry = TOP_NFT_REGISTRY.find((e) => e.contract.toLowerCase() === lc);
+      if (!entry) throw new Error('Buy refused: collection is not in the Top NFTs list');
+      if (!/^0x[0-9a-fA-F]{64}$/.test(req.orderHash)) throw new Error('Invalid order hash');
+      if (!/^0x[0-9a-fA-F]{40}$/.test(req.protocolAddress)) throw new Error('Invalid Seaport address');
+
+      // Always round-trip to OpenSea's /listings/fulfillment_data so
+      // we know which Seaport function this listing wants. Most
+      // single-NFT fixed-price listings use the gas-optimized
+      // `fulfillBasicOrder_efficient_6GL6yc`; encoding `fulfillOrder`
+      // for those (what previous builds did) revert at simulation.
+      // getFulfillmentTx maps the function name to the right
+      // encoder per-listing AND surfaces the parsed offer so we
+      // can verify it matches what the user clicked.
+      const ful = await getFulfillmentTx(
+        req.orderHash,
+        req.protocolAddress,
+        req.chain,
+        acct.address,
+      );
+      // Audit H6: the offer extracted from the Seaport order MUST
+      // match the contract+tokenId the popup confirmed. A poisoned
+      // OpenSea fulfillment response could otherwise quietly route
+      // the user's APE to a different NFT.
+      const expectedContract = String(req.contract ?? '').toLowerCase();
+      const expectedTokenId = String(req.tokenId ?? '');
+      if (
+        ful.offerContract.toLowerCase() !== expectedContract
+        || ful.offerTokenId !== expectedTokenId
+      ) {
+        throw new Error(
+          `Order mismatch: server returned ${ful.offerContract}:${ful.offerTokenId} but user clicked ${expectedContract}:${expectedTokenId}.`,
+        );
+      }
+      const valueWei = (() => { try { return BigInt(ful.valueWei); } catch { return 0n; } })();
+      const maxWei = parseUnits(req.maxApe, 18);
+      // Slippage / drift guard: reject if the encoded native value
+      // exceeds the cap the user confirmed at click-time.
+      if (valueWei > maxWei) {
+        throw new Error(
+          `Listing requires ${formatUnits(valueWei, 18)} APE but you confirmed ${req.maxApe} APE.`,
+        );
+      }
+      if (valueWei <= 0n) throw new Error('Listing has zero price — refusing');
+      if (valueWei > parseUnits('100000', 18)) throw new Error('Listing price exceeds wallet cap');
+
+      const settings = await readSettings();
+
+      // Pre-flight simulation — ADVISORY ONLY. Seaport reverts use
+      // custom errors that ethers doesn't auto-decode, so a "reverted"
+      // simulation can mean any of: expired order, conduit edge case,
+      // RPC simulation environment differing from real execution. We
+      // log the suspect reason and proceed; the real submission gives
+      // the user a faithful answer if it really does revert.
+      const sim = await simulateTransaction(settings.network, {
+        from: acct.address,
+        to: ful.to,
+        value: ful.valueWei,
+        data: ful.data,
+      }).catch(() => ({ ok: false, revertReason: undefined } as const));
+      if (!sim.ok) {
+        console.warn(
+          '[Yacht] NFT buy pre-flight returned a revert; submitting anyway.',
+          sim.revertReason ?? '(no decoded reason)',
+        );
+      }
+
+      const result = await submitSerialized(acct.address, () =>
+        signGenericTransaction(settings.network, acct.privateKey, normalizeTxRequest({
+          from: acct.address,
+          to: ful.to,
+          data: ful.data,
+          value: ful.valueWei,
+        })),
+      ).catch((e) => { throw new Error(friendlyError(e)); });
+
+      // Yacht 0.5% fee — fire-and-forget AFTER a successful buy.
+      // If the fee tx fails for any reason (gas spike, RPC blip),
+      // the user still has the NFT. The buy is the user's primary
+      // intent; the fee is Yacht's revenue and is intentionally
+      // never allowed to block or revert it.
+      if (result.status === 'success') {
+        try {
+          const feeWei = (valueWei * 50n) / 10000n; // 0.5% (50 bps)
+          if (feeWei > 0n) {
+            // Don't await — let it run in the background.
+            void submitSerialized(acct.address, () =>
+              sendNative(settings.network, acct.privateKey, TRADING_FEE_TREASURY, formatUnits(feeWei, 18)),
+            ).catch((e) => {
+              console.warn('[Yacht] NFT fee tx failed (best-effort):', e);
+            });
+          }
+        } catch { /* never block on fee path */ }
+      }
+      return result;
+    }
+
+    case 'nft.vote': {
+      await requireUnlocked();
+      const acct = findAccount(req.account);
+      // Hard-bind to active account, same model as chat.send / chat.tip:
+      // a popup-XSS can't drain a dormant account through this RPC.
+      const active = getActiveAccount();
+      if (!active || active.address.toLowerCase() !== acct.address.toLowerCase()) {
+        throw new Error('Voting is limited to the active account');
+      }
+      // Voting accepts any contract — the on-chain vote tx is a
+      // tiny APE transfer to the treasury, and the display lists
+      // (Top NFTs, Top Tokens) only render votes for contracts in
+      // their respective registries. Spam votes on random contracts
+      // are invisible — they just contribute to the treasury.
+      if (!/^0x[0-9a-fA-F]{40}$/.test(req.collection)) {
+        throw new Error('Invalid contract address');
+      }
+      if (!(VOTE_AMOUNTS as readonly string[]).includes(req.apeAmount)) {
+        throw new Error('Invalid vote amount');
+      }
+      // Reuse the chat-tip daily budget for vote spend. Both flows
+      // auto-confirm without a separate approval popup; combining the
+      // budget keeps the day's total auto-confirmed APE outflow capped
+      // regardless of mix between tips and votes.
+      const settings = await readSettings();
+      const acctLc = acct.address.toLowerCase();
+      const apeWei = parseUnits(req.apeAmount, 18);
+      await reserveTipBudget(acctLc, apeWei);
+      try {
+        return await submitSerialized(acct.address, () =>
+          castVote(settings.network, acct.privateKey, req.collection, req.apeAmount),
+        );
+      } catch (e) {
+        await releaseTipBudget(acctLc, apeWei);
+        throw e;
+      }
     }
 
     // ───────────────────── dApp-originated ─────────────────────
@@ -914,6 +1502,7 @@ async function handle(req: RpcRequest, sender: chrome.runtime.MessageSender | un
         type: 'connect',
         origin,
         payload: { origin },
+        // connect doesn't sign, so no accountId binding is required.
         sourceWindowId: sender?.tab?.windowId,
       });
       return r;
@@ -985,6 +1574,7 @@ async function handle(req: RpcRequest, sender: chrome.runtime.MessageSender | un
           dataAnalysis,
           simulation: sim,
         },
+        accountId: active.id,
         sourceWindowId: sender?.tab?.windowId,
       });
     }
@@ -1011,6 +1601,7 @@ async function handle(req: RpcRequest, sender: chrome.runtime.MessageSender | un
         type: 'personalSign',
         origin,
         payload: { message: req.message, origin, warnings: a.warnings, isRawHash: a.isRawHash },
+        accountId: active.id,
         sourceWindowId: sender?.tab?.windowId,
       });
     }
@@ -1029,6 +1620,7 @@ async function handle(req: RpcRequest, sender: chrome.runtime.MessageSender | un
         type: 'signTypedData',
         origin,
         payload: { typedData: req.payload, origin, analysis },
+        accountId: active.id,
         sourceWindowId: sender?.tab?.windowId,
       });
     }
@@ -1068,15 +1660,20 @@ async function handle(req: RpcRequest, sender: chrome.runtime.MessageSender | un
       await requireUnlocked();
       const settings = await readSettings();
       const cfg = NETWORKS[settings.network];
-      const active = getActiveAccount();
-      if (!active) throw new Error('No active account');
-      // The pending payload was constructed at dapp.* dispatch time with the
-      // active account's address forced into `from`. We re-resolve the
-      // current active account here in case it changed (rare, mid-popup
-      // account switch). Match by id so we sign with exactly the account
-      // shown to the user — if the active account moved, fail safe.
-      const acct = state.unlocked!.accounts.find((a) => a.address.toLowerCase() === active.address.toLowerCase());
-      if (!acct) throw new Error('Active account no longer available');
+      // Audit H2: sign with EXACTLY the account that was bound to this
+      // pending request at dispatch time. If the active account changed
+      // between dispatch and click (e.g. user switched accounts in the
+      // side panel), we still sign as the originally-displayed account
+      // — never let the "from" the user reviewed diverge from the key
+      // we sign with. For request types that don't need a key (connect)
+      // accountId may be undefined, so we fall back to active.
+      const acct = pending.accountId
+        ? state.unlocked!.accounts.find((a) => a.id === pending.accountId)
+        : (() => {
+            const a = getActiveAccount();
+            return a ? state.unlocked!.accounts.find((x) => x.id === a.id) : undefined;
+          })();
+      if (!acct) throw new Error('Account from this request is no longer available');
 
       try {
         // TOCTOU guard: re-check unlock state immediately before each sign.
@@ -1104,6 +1701,15 @@ async function handle(req: RpcRequest, sender: chrome.runtime.MessageSender | un
             assertStillUnlocked();
             return signGenericTransaction(settings.network, acct.privateKey, normalizeTxRequest(safe));
           });
+          // Achievement signal: a successful signTx from opensea.io
+          // is treated as "bought an NFT on OpenSea". Buys go through
+          // Seaport's fulfillBasicOrder / fulfillOrder; listings use
+          // signTypedData (no signTx needed). A successful tx from
+          // opensea.io.* is a strong proxy for a Seaport buy.
+          const r = result as { status?: string } | undefined;
+          if (r?.status === 'success' && isOpenseaHost(hostFromOrigin(pending.origin))) {
+            void recordOpenseaNftPurchase(acct.address);
+          }
         } else if (pending.type === 'personalSign') {
           const p = pending.payload as { message: string };
           assertStillUnlocked();
@@ -1141,6 +1747,13 @@ async function handle(req: RpcRequest, sender: chrome.runtime.MessageSender | un
     case 'origins.revoke': {
       state.approvedOrigins.delete(req.origin);
       await persistApprovedOrigins();
+      // Mark the active account as having revoked at least one site so the
+      // corresponding achievement unlocks. Revocation isn't observable on
+      // chain, so this signal is stored locally per address.
+      const activeForRevoke = getActiveAccount();
+      if (activeForRevoke) {
+        void recordRevokedSite(activeForRevoke.address);
+      }
       return { ok: true };
     }
 

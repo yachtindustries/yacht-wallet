@@ -13,7 +13,7 @@ npm run package
 npm run validate
 ```
 
-You should end up with `dist-zip/yacht-v0.1.3.zip` (the version comes from
+You should end up with `dist-zip/yacht-v0.1.44.zip` (the version comes from
 `package.json`). The validator checks for: missing manifest fields, oversized
 bundle, missing icons, source-map leaks, and a present privacy policy.
 
@@ -77,7 +77,7 @@ Brand colours: water `#5eccfa`, deck `#f6c87e`. Logo at `public/logo.png`.
 ## 6. Create the item
 
 1. Go to https://chrome.google.com/webstore/devconsole
-2. **New item** → upload `dist-zip/yacht-v0.1.3.zip`
+2. **New item** → upload `dist-zip/yacht-v0.1.44.zip`
 3. Wait for the upload to verify (a few seconds).
 4. Fill in the listing — see fields below.
 
@@ -88,7 +88,7 @@ Copy/paste-ready:
 | Field | Value |
 | --- | --- |
 | Name | `Yacht — ApeChain wallet & swaps` |
-| Summary | `Self-custody wallet for ApeChain. Send, receive, swap APE & ERC-20s, view NFTs, connect to dApps. Keys stay on your device.` |
+| Summary | `A Luxury Wallet, Your Home for ApeChain.` |
 | Category | `Productivity` |
 | Language | `English` |
 | Privacy policy URL | (your hosted PRIVACY.md URL) |

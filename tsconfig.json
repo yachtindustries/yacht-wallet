@@ -14,6 +14,9 @@
     "resolveJsonModule": true,
     "isolatedModules": true,
     "skipLibCheck": true,
+    // Type-check only. Vite owns code emission; tsc must NOT write .js
+    // files into src/ where they'd shadow the .ts during resolution.
+    "noEmit": true,
     "types": ["chrome", "vite/client"],
     "baseUrl": ".",
     "paths": {

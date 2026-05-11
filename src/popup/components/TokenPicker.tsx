@@ -113,17 +113,25 @@ export function TokenPicker({ open, onClose, onPick, walletTokens = [], exclude,
   return (
     <div className="fixed inset-0 bg-black/70 flex items-end z-30" onClick={onClose}>
       <div
-        className="bg-bg-card border-t border-line w-full rounded-t-2xl max-h-[90vh] flex flex-col"
+        className="w-full rounded-t-2xl max-h-[90vh] flex flex-col"
+        style={{ backgroundColor: '#002849' }}
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="p-4 border-b border-line">
+        <div className="p-4">
           <div className="flex items-center justify-between mb-3">
-            <h3 className="font-bold" style={{ fontSize: 18 }}>Select a token</h3>
-            <button onClick={onClose} className="text-ink-dim leading-none" style={{ fontSize: 22 }}>×</button>
+            <h3 className="font-bold text-white" style={{ fontSize: 18 }}>Select a token</h3>
+            <button
+              onClick={onClose}
+              className="text-white leading-none font-extrabold hover:opacity-80"
+              style={{ fontSize: 28 }}
+              aria-label="Close"
+            >
+              ×
+            </button>
           </div>
           <input
             autoFocus
-            className="input"
+            className="w-full rounded-xl bg-white px-3 py-2.5 font-bold text-black placeholder:text-black/60 focus:outline-none"
             style={{ fontSize: 16 }}
             placeholder="Search Tokens"
             value={query}
@@ -146,10 +154,10 @@ export function TokenPicker({ open, onClose, onPick, walletTokens = [], exclude,
           )}
 
           {searching && totalResults === 0 && (
-            <div className="text-center text-ink-dim py-6" style={{ fontSize: 16 }}>Searching DexScreener…</div>
+            <div className="text-center text-white/85 py-6" style={{ fontSize: 16 }}>Searching DexScreener…</div>
           )}
           {!searching && totalResults === 0 && (
-            <div className="text-center text-ink-dim py-6" style={{ fontSize: 16 }}>
+            <div className="text-center text-white/85 py-6" style={{ fontSize: 16 }}>
               No matches.
             </div>
           )}
@@ -173,7 +181,7 @@ function Section({
   return (
     <>
       <div
-        className="uppercase tracking-wider text-ink-faint px-3 mt-2 mb-1"
+        className="uppercase tracking-wider text-white/70 px-3 mt-2 mb-1 font-bold"
         style={{ fontSize: 13 }}
       >
         {title}
@@ -188,12 +196,12 @@ function Section({
           <button
             key={k}
             onClick={() => onPick(t)}
-            className="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl hover:bg-bg-soft text-left"
+            className="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl hover:bg-white/10 text-left"
           >
             <TokenLogo token={t} size={42} />
             <div className="flex-1 min-w-0">
               <div className="flex items-center gap-1.5">
-                <span className="font-bold" style={{ fontSize: 16 }}>{t.symbol}</span>
+                <span className="font-bold text-white" style={{ fontSize: 16 }}>{t.symbol}</span>
                 {t.verified && (
                   <img
                     src={verifiedIconUrl}
@@ -204,17 +212,17 @@ function Section({
                   />
                 )}
               </div>
-              <div className="text-ink-faint truncate" style={{ fontSize: 13 }}>
+              <div className="text-white/70 truncate" style={{ fontSize: 13 }}>
                 {t.name} {!isNative(t) && <span className="font-mono">· {shortAddress(t.address)}</span>}
               </div>
             </div>
             {balN != null && balN > 0 && (
               <div className="text-right shrink-0">
-                <div className="font-bold" style={{ fontSize: 14 }}>
+                <div className="font-bold text-white" style={{ fontSize: 14 }}>
                   {balN.toLocaleString(undefined, { maximumFractionDigits: 3 })}
                 </div>
                 {usd != null && (
-                  <div className="text-ink-faint" style={{ fontSize: 12 }}>
+                  <div className="text-white/70" style={{ fontSize: 12 }}>
                     ${usd.toLocaleString(undefined, { maximumFractionDigits: 2, minimumFractionDigits: 2 })}
                   </div>
                 )}

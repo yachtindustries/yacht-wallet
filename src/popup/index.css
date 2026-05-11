@@ -8,6 +8,18 @@
    wallet fill whatever the panel container is. */
 html {
   margin: 0;
+  /* Painted under everything so the overscroll-bounce surface (visible when
+     the user scrolls past the page edges) renders navy instead of leaking
+     the old cream body fallback. */
+  background: #002849;
+  /* macOS / iOS scroll bounce can still flash a white strip through inner
+     overflow containers if it propagates up to the document. Containing
+     the bounce here keeps the parchment-white overscroll from ever
+     appearing under the navy chrome. */
+  overscroll-behavior: none;
+}
+body {
+  overscroll-behavior: none;
 }
 body {
   width: 380px;
@@ -38,12 +50,84 @@ html.mode-sidepanel #root {
   margin: 0;
 }
 
+/* Capacitor (iOS / Android). Fill the device edge-to-edge; the 380px popup
+   canvas is dropped — content scales to the device width. The safe-area
+   padding lives on individual chrome (TopBar, BottomNav, Dashboard header)
+   so that each screen's own background paints the inset zone instead of a
+   global navy band hiding the homepage's water artwork on the top sides. */
+html.mode-mobile,
+html.mode-mobile body {
+  width: 100%;
+  min-width: 100%;
+  height: 100%;
+  min-height: 100%;
+  height: 100dvh;
+  min-height: 100dvh;
+}
+html.mode-mobile #root {
+  width: 100%;
+  max-width: 100%;
+  height: 100dvh;
+  min-height: 100dvh;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  box-sizing: border-box;
+  /* Background intentionally unset so the Screen / YachtBackground inside
+     paints to the device edges (homepage water blue on top, navy below).
+     Each Screen sets its own backgroundColor in JSX. */
+}
+
+/* Expose safe-area insets as variables so screens that aren't rendered via
+   TopBar / BottomNav can pick them up without re-typing env() everywhere. */
+html.mode-mobile {
+  --safe-top: env(safe-area-inset-top);
+  --safe-bottom: env(safe-area-inset-bottom);
+  --safe-left: env(safe-area-inset-left);
+  --safe-right: env(safe-area-inset-right);
+}
+html:not(.mode-mobile) {
+  --safe-top: 0px;
+  --safe-bottom: 0px;
+  --safe-left: 0px;
+  --safe-right: 0px;
+}
+
+/* Per-screen mobile up-scaling. The desktop popup canvas is 380×600 with
+   carefully tuned font sizes; for mobile the user wants certain pages to
+   render larger without us re-typing every px value. The `zoom` property
+   scales layout AND hit-targets together — supported by both WKWebView
+   and Android Chromium WebView — so click areas grow with the visuals. */
+html.mode-mobile .mobile-scale-120 { zoom: 1.2; }
+
+/* Bundled-ML-Kit camera scanner (used in Send.tsx). The plugin renders
+   the camera preview *behind* the WebView, so for the camera to be
+   visible the entire painted stack — html, body, #root content — has
+   to drop to transparent. MainActivity.java sets the Android WebView
+   itself transparent at startup; these CSS rules toggle the page's
+   own paint via a class set on both <html> and <body> while scanning.
+   Anything with `.scanner-overlay` (the Cancel button + reticle drawn
+   by Send) stays visible on top. */
+html.barcode-scanner-active,
+html.barcode-scanner-active body {
+  background: transparent !important;
+}
+body.barcode-scanner-active #root > * {
+  visibility: hidden !important;
+}
+body.barcode-scanner-active .scanner-overlay {
+  visibility: visible !important;
+}
+
 body {
   font-family: 'Roboto', system-ui, -apple-system, sans-serif;
   font-weight: 400;
   -webkit-font-smoothing: antialiased;
-  background: #fbf3df;
-  color: #2e2114;
+  /* Yacht navy. Cards inside the page render light, but the body background
+     and any popup edges paint the brand colour. */
+  background: #002849;
+  color: #ffffff;
 }
 
 h1, h2, h3, h4, .font-semibold, .font-bold, .btn-primary, .btn-ghost {
@@ -86,6 +170,150 @@ h1, h2, h3, h4, .font-semibold, .font-bold, .btn-primary, .btn-ghost {
   animation: yacht-confetti 1.5s cubic-bezier(.18,.76,.4,1) forwards;
 }
 
+/* Used by AchievementToast — confetti pieces fall straight down with a
+   light tumble. Each piece supplies its own --end-rot so the rotation is
+   randomised per element. */
+@keyframes yacht-rain {
+  0%   { transform: translateY(0) rotate(0); opacity: 1; }
+  85%  { opacity: 1; }
+  100% { transform: translateY(380px) rotate(var(--end-rot, 360deg)); opacity: 0; }
+}
+.yacht-rain {
+  animation: yacht-rain ease-in forwards;
+}
+
+/* Diagonal shimmer that sweeps across primary water-blue CTAs (Unlock,
+   Create wallet, Send, Swap). The pseudo-element holds a translucent
+   white gradient that translates across the button on a 2.5s loop. */
+@keyframes yacht-shine {
+  0%   { transform: translateX(-110%) skewX(-18deg); }
+  60%  { transform: translateX(160%)  skewX(-18deg); }
+  100% { transform: translateX(160%)  skewX(-18deg); }
+}
+.btn-shine {
+  position: relative;
+  overflow: hidden;
+  background: linear-gradient(180deg, #6dd6fb 0%, #5eccfa 55%, #46b9ec 100%);
+  box-shadow: 0 4px 14px -6px rgba(94, 204, 250, 0.55);
+}
+.btn-shine::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    100deg,
+    rgba(255,255,255,0) 30%,
+    rgba(255,255,255,0.55) 50%,
+    rgba(255,255,255,0) 70%
+  );
+  width: 60%;
+  animation: yacht-shine 2.6s ease-in-out infinite;
+  pointer-events: none;
+}
+.btn-shine:hover { background: linear-gradient(180deg, #57c4f4 0%, #46b9ec 60%, #2fa6dc 100%); }
+.btn-shine:disabled { opacity: 0.6; }
+.btn-shine:disabled::before { animation-play-state: paused; opacity: 0.25; }
+
+/* Animated fill for progress bars — a narrow sheen streak that drifts
+   across the base colour. Two design choices keep the loop seamless:
+   1) the gradient is symmetric (fill at 0% AND 100% with the highlight
+      only in the middle 40%), so the periodic tiling looks identical at
+      any multiple of the background width;
+   2) the keyframe shifts background-position by exactly one gradient
+      width (200%), so the keyframe end maps to the exact same visual
+      state as the start — no snap, no flash on restart.
+   Subtler than the prior gradient: the highlight color is only a step
+   lighter than the base instead of near-white. */
+@keyframes yacht-bar-shine {
+  0%   { background-position: 0% 0%; }
+  100% { background-position: -200% 0%; }
+}
+.bar-shiny {
+  background-image: linear-gradient(
+    90deg,
+    var(--bar-fill) 0%,
+    var(--bar-fill) 30%,
+    var(--bar-shine) 50%,
+    var(--bar-fill) 70%,
+    var(--bar-fill) 100%
+  );
+  background-size: 200% 100%;
+  animation: yacht-bar-shine 3.2s linear infinite;
+}
+
+/* Tiny boat-on-wave wobble used by the Unlock yacht logo when the user
+   types into the password field. We trigger it by adding the class on
+   keydown and removing it 600ms later. */
+@keyframes yacht-wave {
+  0%   { transform: translateY(0)    rotate(0deg); }
+  20%  { transform: translateY(-3px) rotate(-2.5deg); }
+  45%  { transform: translateY(2px)  rotate(2deg); }
+  70%  { transform: translateY(-1px) rotate(-1deg); }
+  100% { transform: translateY(0)    rotate(0deg); }
+}
+.yacht-wave {
+  animation: yacht-wave 0.7s ease-out;
+  transform-origin: 50% 70%;
+}
+
+/* Dashboard token rows — scale up a touch on hover and let the inner
+   .token-logo wrapper pulse subtly while the cursor is on the row. */
+@keyframes yacht-token-pulse {
+  0%, 100% { transform: scale(1); }
+  50%      { transform: scale(1.06); }
+}
+.token-row {
+  transition: transform 180ms ease-out;
+}
+.token-row:hover {
+  transform: scale(1.03);
+}
+.token-row:hover .token-logo {
+  animation: yacht-token-pulse 1.6s ease-in-out infinite;
+  display: inline-block;
+}
+
+/* Bottom-nav jelly squash on click. Triggered by the React click handler
+   which adds the .nav-bounce class for one animation cycle. */
+@keyframes yacht-nav-bounce {
+  0%   { transform: scale(1)             translateY(0); }
+  30%  { transform: scale(0.78, 1.18)    translateY(-2px); }
+  55%  { transform: scale(1.10, 0.92)    translateY(0); }
+  80%  { transform: scale(0.96, 1.04)    translateY(0); }
+  100% { transform: scale(1)             translateY(0); }
+}
+.nav-bounce {
+  animation: yacht-nav-bounce 0.32s cubic-bezier(.5,.05,.4,1.6);
+  transform-origin: 50% 70%;
+}
+
+/* Home-page action buttons — Send / Swap / Receive. Each gets its own
+   hover animation: send arrow nudges UP and back down, receive arrow
+   nudges DOWN and back up, the swap glyph does a subtle squash bounce.
+   Inner span is .action-icon; parent button uses .action-* modifier. */
+@keyframes yacht-action-up {
+  0%, 100% { transform: translateY(0); }
+  35%      { transform: translateY(-4px); }
+  60%      { transform: translateY(1px); }
+  85%      { transform: translateY(-1px); }
+}
+@keyframes yacht-action-down {
+  0%, 100% { transform: translateY(0) rotate(180deg); }
+  35%      { transform: translateY(4px) rotate(180deg); }
+  60%      { transform: translateY(-1px) rotate(180deg); }
+  85%      { transform: translateY(1px) rotate(180deg); }
+}
+@keyframes yacht-action-jelly {
+  0%, 100% { transform: scale(1)         skew(0deg); }
+  30%      { transform: scale(0.85, 1.15) skew(-3deg); }
+  55%      { transform: scale(1.10, 0.90) skew(2deg); }
+  80%      { transform: scale(0.97, 1.03) skew(-1deg); }
+}
+.action-send:hover    .action-icon { animation: yacht-action-up    0.55s ease-out; }
+.action-receive:hover .action-icon { animation: yacht-action-down  0.55s ease-out; }
+.action-swap:hover    .action-icon { animation: yacht-action-jelly 0.55s ease-out; }
+
+
 @layer components {
   .btn {
     @apply inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl font-medium text-sm transition;
@@ -103,7 +331,10 @@ h1, h2, h3, h4, .font-semibold, .font-bold, .btn-primary, .btn-ghost {
     @apply w-full bg-bg-soft border border-line rounded-xl px-3 py-2.5 text-sm text-ink placeholder:text-ink-faint focus:outline-none focus:border-brand;
   }
   .label {
-    @apply text-xs uppercase tracking-wider text-ink-dim mb-1.5 block;
+    /* Labels render directly on the navy page background, so the existing
+       ink-dim brown is invisible. White at 75% gives enough contrast while
+       still reading as a secondary header. */
+    @apply text-xs uppercase tracking-wider text-white/75 mb-1.5 block font-bold;
   }
   .card {
     @apply bg-bg-card border border-line rounded-2xl p-4;

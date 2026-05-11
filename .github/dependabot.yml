@@ -1,0 +1,48 @@
+version: 2
+updates:
+  # JavaScript dependencies — wallet, react, ethers, capacitor.
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 10
+    labels:
+      - "dependencies"
+      - "javascript"
+    # Group framework updates together so we get one PR per ecosystem
+    # rather than 5 separate React patch bumps. Security updates are
+    # always opened individually regardless of the group.
+    groups:
+      capacitor:
+        patterns:
+          - "@capacitor/*"
+          - "@capacitor-mlkit/*"
+      react:
+        patterns:
+          - "react"
+          - "react-dom"
+          - "@types/react"
+          - "@types/react-dom"
+      ethers:
+        patterns:
+          - "ethers"
+          - "@noble/*"
+
+  # Android (Gradle) dependencies — Capacitor plugins, AndroidX,
+  # ML Kit. Less frequent because every bump triggers an Android rebuild.
+  - package-ecosystem: "gradle"
+    directory: "/android"
+    schedule:
+      interval: "monthly"
+    labels:
+      - "dependencies"
+      - "android"
+
+  # GitHub Actions versions in .github/workflows/.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "monthly"
+    labels:
+      - "dependencies"
+      - "ci"

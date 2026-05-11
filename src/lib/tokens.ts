@@ -107,3 +107,17 @@ export function safeChecksum(address: string): string {
     return address;
   }
 }
+
+/**
+ * Lower-case set of every token address in TOP_TOKENS that's marked
+ * `verified: true`. UI uses this to render a verified-checkmark badge
+ * and to push verified tokens to the top of the Discover trending list.
+ */
+const VERIFIED_ADDRESSES = new Set(
+  TOP_TOKENS.filter((t) => t.verified).map((t) => t.address.toLowerCase()),
+);
+
+export function isVerifiedAddress(address: string | undefined | null): boolean {
+  if (!address) return false;
+  return VERIFIED_ADDRESSES.has(address.toLowerCase());
+}

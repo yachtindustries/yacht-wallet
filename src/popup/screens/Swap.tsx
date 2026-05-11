@@ -16,6 +16,7 @@ const SLIPPAGE_OPTIONS = [50, 100, 300, 500];
 const FEE_BUFFER_APE = 0.005;
 const swapIconUrl = chrome.runtime.getURL('public/actions/swap.png');
 const settingsIconUrl = chrome.runtime.getURL('public/actions/settings.png');
+const successSoundUrl = chrome.runtime.getURL('successsound.wav');
 
 // Yacht swaps run through the Camelot V2 router on ApeChain. Camelot is the
 // dominant DEX on ApeChain so most listed ERC-20s have liquidity there.
@@ -44,6 +45,20 @@ export default function Swap() {
   const [txStatus, setTxStatus] = useState<'idle' | 'pending' | 'success' | 'error'>('idle');
   const [txMessage, setTxMessage] = useState<string>('');
   const submitting = txStatus === 'pending';
+
+  // Fire the celebratory chime the moment the success overlay (water-blue
+  // backdrop + check + confetti) appears. Single-shot — no looping. Audio
+  // playback may be blocked by the browser if the page hasn't seen a user
+  // gesture yet, but a swap requires the user to click "Swap" first so
+  // we're always inside a gesture-allowed window when this fires.
+  useEffect(() => {
+    if (txStatus !== 'success') return;
+    try {
+      const a = new Audio(successSoundUrl);
+      a.volume = 0.6;
+      void a.play().catch(() => { /* browser blocked autoplay — silent */ });
+    } catch { /* Audio API unavailable */ }
+  }, [txStatus]);
 
   const [summary, setSummary] = useState<AccountSummary | null>(null);
   const [tokens, setTokens] = useState<Erc20Balance[]>([]);
@@ -309,7 +324,7 @@ export default function Swap() {
           </button>
         }
       />
-      <Page tone="deck">
+      <Page tone="deck" className="mobile-scale-120">
         {showLowApeWarning && (
           <div className="mb-3 p-3 rounded-xl bg-warn/10 border border-warn/30 text-xs text-warn">
             Low APE balance — leave a small amount for gas.
@@ -429,7 +444,7 @@ export default function Swap() {
         {quoteErr && <div className="text-danger text-xs mt-3">{quoteErr}</div>}
 
         <button
-          className="btn w-full mt-4 text-white font-bold bg-[#5eccfa] hover:bg-[#3eb8e8] disabled:opacity-60"
+          className="btn btn-shine w-full mt-4 text-white font-bold disabled:opacity-60"
           style={{ fontSize: 17 }}
           disabled={!quote || submitting || !canQuote || overSpendable}
           onClick={doSwap}
@@ -482,13 +497,17 @@ export default function Swap() {
 
         {showSettings && (
           <div className="fixed inset-0 bg-black/70 flex items-end z-30" onClick={() => setShowSettings(false)}>
-            <div className="bg-bg-card border-t border-line w-full p-4 rounded-t-2xl" onClick={(e) => e.stopPropagation()}>
+            <div
+              className="w-full p-4 rounded-t-2xl"
+              style={{ backgroundColor: '#002849' }}
+              onClick={(e) => e.stopPropagation()}
+            >
               <div className="flex items-center justify-between mb-3">
-                <h3 className="font-bold" style={{ fontSize: 24 }}>Slippage</h3>
+                <h3 className="font-bold text-white" style={{ fontSize: 24 }}>Slippage</h3>
                 <button
                   onClick={() => setShowSettings(false)}
-                  className="text-ink-dim font-bold leading-none"
-                  style={{ fontSize: 26 }}
+                  className="text-white font-extrabold leading-none hover:opacity-80"
+                  style={{ fontSize: 28 }}
                   aria-label="Close"
                 >
                   ×
@@ -499,8 +518,10 @@ export default function Swap() {
                   <button
                     key={bps}
                     onClick={() => { setSlippageBps(bps); setCustomSlip(''); }}
-                    className={`py-2 rounded-xl border font-bold ${
-                      slippageBps === bps && !customSlip ? 'border-brand bg-brand/10 text-brand' : 'border-line bg-bg-soft text-ink'
+                    className={`py-2 rounded-xl font-bold ${
+                      slippageBps === bps && !customSlip
+                        ? 'bg-[#5eccfa] text-white'
+                        : 'bg-white text-black'
                     }`}
                     style={{ fontSize: 16 }}
                   >
@@ -508,7 +529,7 @@ export default function Swap() {
                   </button>
                 ))}
                 <input
-                  className="input font-bold"
+                  className="w-full rounded-xl bg-white px-3 py-2 font-bold text-black placeholder:text-black/60 focus:outline-none"
                   style={{ fontSize: 16 }}
                   placeholder="Custom"
                   inputMode="decimal"
@@ -521,7 +542,7 @@ export default function Swap() {
                 />
               </div>
               {slippageBps >= 300 && (
-                <div className="text-danger text-xs mb-3">
+                <div className="text-danger text-xs mb-3 font-bold">
                   High slippage ({(slippageBps / 100).toFixed(2)}%) — your trade may be sandwiched by MEV bots.
                 </div>
               )}

@@ -10,10 +10,17 @@ interface Props {
   className?: string;
 }
 
+// Fallback circle colour when a token has no remote logo. Light grey-blue
+// reads on both white cards and the navy page background while staying
+// visually muted — not competing with verified-token logos.
+const FALLBACK_BG = '#a3b8c7';
+
 export function TokenLogo({ token, size = 36, className = '' }: Props) {
   const [logo, setLogo] = useState<string | null>(() => token.logo ?? memo.get(keyOf(token)) ?? null);
+  const [broken, setBroken] = useState(false);
 
   useEffect(() => {
+    setBroken(false);
     if (token.logo) { setLogo(token.logo); return; }
     const k = keyOf(token);
     if (memo.has(k)) {
@@ -40,28 +47,29 @@ export function TokenLogo({ token, size = 36, className = '' }: Props) {
     return () => { cancelled = true; };
   }, [token.address, token.logo]);
 
-  const initials = useMemo(() => token.symbol.slice(0, 2).toUpperCase(), [token]);
-  const style = { width: size, height: size, fontSize: Math.max(10, size * 0.35) };
+  const initial = useMemo(() => (token.symbol[0] ?? '?').toUpperCase(), [token.symbol]);
+  const style = { width: size, height: size };
+  const showFallback = !logo || broken;
 
-  if (logo) {
+  if (showFallback) {
     return (
-      <img
-        src={logo}
-        alt={token.symbol}
-        className={`rounded-full bg-bg-soft border border-line object-cover ${className}`}
-        style={style}
-        onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = 'none'; }}
-      />
+      <div
+        className={`rounded-full flex items-center justify-center font-bold text-white shrink-0 ${className}`}
+        style={{ ...style, backgroundColor: FALLBACK_BG, fontSize: Math.max(12, Math.round(size * 0.45)) }}
+      >
+        {initial}
+      </div>
     );
   }
 
   return (
-    <div
-      className={`rounded-full bg-brand/15 border border-brand/30 flex items-center justify-center font-bold text-brand shrink-0 ${className}`}
+    <img
+      src={logo!}
+      alt={token.symbol}
+      className={`rounded-full bg-white object-cover shrink-0 ${className}`}
       style={style}
-    >
-      {initials}
-    </div>
+      onError={() => { if (!broken) setBroken(true); }}
+    />
   );
 }
 

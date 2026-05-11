@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+
+  build-mobile:
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+      - run: npm ci
+      # Mobile SPA build — produces dist-mobile/ used by `cap sync`.
+      - run: npm run build:mobile
+      # Sync the dist-mobile/ payload into android/. We don't run the full
+      # Gradle build in CI by default — release AABs need the production
+      # keystore which lives outside the repo. Once the keystore is wired
+      # via GitHub Actions secrets, uncomment the gradlew step below.
+      - run: npx cap sync android
+      # - run: cd android && ./gradlew assembleDebug
+
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+      - run: npm ci
+      # Fail on high/critical vulnerabilities. moderate-and-below are
+      # surfaced separately by Dependabot and don't block PRs.
+      - run: npm audit --audit-level=high

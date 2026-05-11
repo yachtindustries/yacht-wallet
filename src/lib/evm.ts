@@ -13,7 +13,7 @@ import {
   TransactionReceipt,
   ZeroAddress,
   isHexString,
-  hexlify,
+  getBytes,
   toUtf8Bytes,
   type AbstractProvider,
 } from 'ethers';
@@ -418,6 +418,16 @@ function ipfsToHttp(uri: string): string {
 }
 
 /**
+ * Resolve every gateway candidate for an ipfs:// URI so we can try them
+ * in turn. Non-ipfs URIs come back as a single-element list.
+ */
+function ipfsCandidates(uri: string): string[] {
+  if (!uri.startsWith('ipfs://')) return [uri];
+  const path = uri.replace(/^ipfs:\/\//, '').replace(/^ipfs\//, '');
+  return IPFS_GATEWAYS.map((g) => `${g}${path}`);
+}
+
+/**
  * Anti-SSRF guard. NFT tokenURI is contract-controlled and an attacker could
  * point it at internal services. We accept ONLY:
  *   - https:// URLs whose host is not an RFC1918 / loopback / link-local IP
@@ -523,12 +533,12 @@ async function fetchNftMetadata(
   try {
     const uri = await readTokenUri(network, contract, tokenId);
     if (!uri) return {};
-    const url = ipfsToHttp(uri);
-    if (url.startsWith('data:application/json')) {
-      const comma = url.indexOf(',');
+    // data: URIs decode in-process — no fetch.
+    if (uri.startsWith('data:application/json')) {
+      const comma = uri.indexOf(',');
       if (comma < 0) return {};
-      const isB64 = url.slice(0, comma).includes(';base64');
-      const payload = isB64 ? atob(url.slice(comma + 1)) : decodeURIComponent(url.slice(comma + 1));
+      const isB64 = uri.slice(0, comma).includes(';base64');
+      const payload = isB64 ? atob(uri.slice(comma + 1)) : decodeURIComponent(uri.slice(comma + 1));
       const json = JSON.parse(payload);
       const imageUrl = json.image ? ipfsToHttp(json.image) : undefined;
       return {
@@ -536,13 +546,29 @@ async function fetchNftMetadata(
         name: typeof json.name === 'string' ? json.name : undefined,
       };
     }
-    if (!isSafeMetadataUrl(url)) return {};
-    const r = await fetchWithTimeout(url);
-    if (!r || !r.ok) return {};
-    const meta = await r.json();
-    const imageUrl = meta?.image ? ipfsToHttp(meta.image) : undefined;
+    // For ipfs:// URIs we try every gateway in IPFS_GATEWAYS until one
+    // returns 2xx. Previously a single-gateway 503 / 429 silently dropped
+    // the metadata for the whole NFT.
+    const candidates = ipfsCandidates(uri).filter(isSafeMetadataUrl);
+    let meta: any = null;
+    for (const c of candidates) {
+      const r = await fetchWithTimeout(c);
+      if (!r || !r.ok) continue;
+      try { meta = await r.json(); break; } catch { continue; }
+    }
+    if (!meta) return {};
+    // Same multi-gateway logic for the embedded image URL.
+    let imageUrl: string | undefined;
+    if (typeof meta.image === 'string' && meta.image) {
+      const imgCandidates = ipfsCandidates(meta.image).filter(isSafeMetadataUrl);
+      imageUrl = imgCandidates[0]; // First viable form; <img> handles the actual fetch with the browser's own retries.
+    } else if (typeof meta.image_url === 'string' && meta.image_url) {
+      // Some indexers return image_url instead of image.
+      const imgCandidates = ipfsCandidates(meta.image_url).filter(isSafeMetadataUrl);
+      imageUrl = imgCandidates[0];
+    }
     return {
-      image: imageUrl && isSafeMetadataUrl(imageUrl) ? imageUrl : undefined,
+      image: imageUrl,
       name: typeof meta?.name === 'string' ? meta.name : undefined,
     };
   } catch {
@@ -550,7 +576,97 @@ async function fetchNftMetadata(
   }
 }
 
+// ─── Reservoir NFT indexer ────────────────────────────────────────────────
+//
+// Reservoir is a public NFT API that already does the heavy lifting we
+// were doing manually: walks ownership across ERC-721 + ERC-1155, decodes
+// every flavour of metadata (data:, ipfs://, custom indexer URLs,
+// on-chain SVGs, Renamed/upgraded contracts), and serves a CDN-cached
+// image URL. Many ApeChain contracts have non-standard metadata that
+// `tokenURI()` + a public IPFS gateway can't render — Reservoir handles
+// those because it talks directly to OpenSea + the project's own
+// indexer. We use it as the primary source and keep the Etherscan +
+// tokenURI flow as a fallback for cases Reservoir hasn't indexed yet.
+
+const RESERVOIR_API_BASE: Record<NetworkId, string | null> = {
+  mainnet: 'https://api-apechain.reservoir.tools',
+};
+
+interface ReservoirToken {
+  token?: {
+    contract?: string;
+    tokenId?: string;
+    name?: string;
+    image?: string;
+    imageSmall?: string;
+    media?: string;
+    collection?: { name?: string };
+  };
+}
+
+async function fetchOwnedNftsViaReservoir(
+  network: NetworkId,
+  address: string,
+): Promise<OwnedNft[] | null> {
+  const base = RESERVOIR_API_BASE[network];
+  if (!base) return null;
+  // Reservoir's free tier doesn't require an API key for ownership lookup.
+  // limit=50 keeps us under the rate limit for free use; v10 is the latest
+  // stable owners endpoint.
+  const url = `${base}/users/${address}/tokens/v10?limit=50`;
+  let resp: Response;
+  try {
+    const ctl = new AbortController();
+    const t = setTimeout(() => ctl.abort(), 6000);
+    try {
+      resp = await fetch(url, { signal: ctl.signal });
+    } finally {
+      clearTimeout(t);
+    }
+  } catch {
+    return null;
+  }
+  if (!resp.ok) return null;
+  let body: any;
+  try { body = await resp.json(); } catch { return null; }
+  const tokens: ReservoirToken[] = Array.isArray(body?.tokens) ? body.tokens : [];
+  const out: OwnedNft[] = [];
+  for (const entry of tokens) {
+    const t = entry?.token;
+    if (!t || typeof t.contract !== 'string' || typeof t.tokenId !== 'string') continue;
+    // Defence in depth: validate any Reservoir-supplied image URL
+    // through the same SSRF guard used for tokenURI metadata.
+    const rawImg = t.image || t.imageSmall || t.media;
+    const safeImg = typeof rawImg === 'string' && isSafeMetadataUrl(rawImg) ? rawImg : undefined;
+    out.push({
+      contract: t.contract,
+      contractSymbol: undefined,
+      contractName: t.collection?.name,
+      tokenId: t.tokenId,
+      name: typeof t.name === 'string' ? t.name : undefined,
+      image: safeImg,
+    });
+  }
+  return out;
+}
+
 export async function getOwnedNfts(
+  network: NetworkId,
+  address: string,
+  withMetadata = true,
+): Promise<OwnedNft[]> {
+  // Try Reservoir first — it has the metadata pipeline ApeChain NFTs
+  // actually need. Successful response (even with zero tokens for an
+  // empty wallet) is authoritative.
+  const reservoir = await fetchOwnedNftsViaReservoir(network, address);
+  if (reservoir !== null) return reservoir;
+  // Reservoir unreachable — fall through to the Etherscan + tokenURI
+  // path so the wallet still surfaces SOME NFT info. Same logic as
+  // before, kept verbatim below.
+  return await getOwnedNftsViaEtherscan(network, address, withMetadata);
+}
+
+async function getOwnedNftsViaEtherscan(
   network: NetworkId,
   address: string,
   withMetadata = true,
@@ -684,6 +800,49 @@ export async function sendNative(
   };
 }
 
+// ─────────────────────────── ERC-721 transfer ────────────────────────────
+
+const ERC721_TRANSFER_ABI = [
+  'function safeTransferFrom(address from, address to, uint256 tokenId)',
+];
+const erc721TransferIface = new Interface(ERC721_TRANSFER_ABI);
+
+/**
+ * Transfer a single ERC-721 NFT from the user's wallet to `to`.
+ * Uses safeTransferFrom which reverts if the destination is a contract
+ * that doesn't implement IERC721Receiver — protecting the user from
+ * accidentally locking the NFT in a non-NFT-aware contract.
+ */
+export async function sendNft(
+  network: NetworkId,
+  privateKey: string,
+  contract: string,
+  tokenId: string,
+  to: string,
+): Promise<SendResult> {
+  const provider = getProvider(network);
+  const wallet = new Wallet(privateKey, provider);
+  // Validate the tokenId can be parsed as a uint256. NFT collections
+  // sometimes have very large token ids (full uint256), so BigInt is
+  // the right type here.
+  let tokenIdBn: bigint;
+  try { tokenIdBn = BigInt(tokenId); } catch { throw new Error('Invalid token id'); }
+  const data = erc721TransferIface.encodeFunctionData('safeTransferFrom', [wallet.address, to, tokenIdBn]);
+  const overrides = await buildOverrides(provider, { to: contract, data }, wallet.address);
+  const gasEstimate = await provider.estimateGas({ from: wallet.address, to: contract, data });
+  if (gasEstimate > MAX_GAS_LIMIT) throw new Error('Estimated gas is unreasonable');
+  overrides.gasLimit = (gasEstimate * 12n) / 10n;
+  const tx = await wallet.sendTransaction(overrides);
+  const receipt = await tx.wait();
+  if (!receipt) throw new Error('Transaction dropped from mempool');
+  return {
+    hash: receipt.hash,
+    status: receipt.status === 1 ? 'success' : 'failed',
+    blockNumber: receipt.blockNumber,
+    raw: receipt,
+  };
+}
+
 export async function sendErc20(
   network: NetworkId,
   privateKey: string,
@@ -749,7 +908,15 @@ export async function signGenericTransaction(
 
 export async function personalSign(privateKey: string, message: string): Promise<string> {
   const wallet = new Wallet(privateKey);
-  const bytes = isHexString(message) ? hexlify(message) : toUtf8Bytes(message);
+  // EIP-191 / personal_sign: dApps may pass either a UTF-8 string or a
+  // 0x-prefixed hex blob. wallet.signMessage(string) ALWAYS treats its
+  // input as UTF-8, so a hex-encoded message would be signed as the
+  // bytes of the literal hex string ("0xabc…") rather than the bytes
+  // they decode to. Privy's SIWE-link flow (used by Otherside, Glyph,
+  // others) ships its messages this way; without the getBytes() branch
+  // here, the resulting signature fails backend verification with
+  // "invalid_data". MetaMask and Rabby both decode in the same way.
+  const bytes = isHexString(message) ? getBytes(message) : toUtf8Bytes(message);
   return wallet.signMessage(bytes);
 }
 

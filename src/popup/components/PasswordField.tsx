@@ -41,7 +41,7 @@ export function PasswordField({ value, onChange, placeholder = 'Password', showS
             </span>
           </div>
           {value.length < 12 && (
-            <div className="text-[10px] text-ink-faint mt-0.5">Use at least 12 characters.</div>
+            <div className="text-[10px] text-white/70 mt-0.5">Use at least 12 characters.</div>
           )}
         </div>
       )}

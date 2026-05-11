@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Android 12+ data extraction rules. Both <cloud-backup> and
+  <device-transfer> exclude the entire app's storage so the encrypted
+  vault, derived AES key cache, and any preferences never leave the
+  user's device via Google Backup, adb backup, or device-to-device
+  transfer. allowBackup="false" in AndroidManifest already covers
+  Android <12; this file covers Android 12+.
+-->
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="root" />
+        <exclude domain="file" />
+        <exclude domain="database" />
+        <exclude domain="sharedpref" />
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="root" />
+        <exclude domain="file" />
+        <exclude domain="database" />
+        <exclude domain="sharedpref" />
+    </device-transfer>
+</data-extraction-rules>

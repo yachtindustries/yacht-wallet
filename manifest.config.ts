@@ -4,7 +4,7 @@ import pkg from './package.json';
 export default defineManifest({
   manifest_version: 3,
   name: 'Yacht',
-  description: 'Yacht — self-custody wallet for ApeChain. Send, receive, swap APE & ERC-20 tokens.',
+  description: 'A Luxury Wallet, Your Home for ApeChain.',
   version: pkg.version,
   action: {
     default_popup: 'index.html',
@@ -39,7 +39,13 @@ export default defineManifest({
   ],
   web_accessible_resources: [
     {
-      resources: ['public/logo.png', 'public/nav/*.png', 'public/actions/*.png'],
+      resources: [
+        'public/logo.png',
+        'public/nav/*.png',
+        'public/actions/*.png',
+        // Rank avatars rendered in Accounts and Achievements screens.
+        'ranks/*.png',
+      ],
       matches: ['<all_urls>'],
     },
   ],

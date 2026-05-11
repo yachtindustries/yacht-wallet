@@ -8,6 +8,10 @@ export default defineConfig({
   plugins: [react(), crx({ manifest })],
   resolve: {
     alias: { '@': path.resolve(__dirname, 'src') },
+    // Prefer .ts over any committed/leftover .js sibling. Vite's default
+    // ordering is .js before .ts, which would silently ship outdated code
+    // if a stale compiled .js sits next to a freshly-edited .ts.
+    extensions: ['.ts', '.tsx', '.mts', '.js', '.jsx', '.mjs', '.cjs', '.json'],
   },
   build: {
     target: 'esnext',

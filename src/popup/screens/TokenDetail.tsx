@@ -6,6 +6,7 @@ import { AddressActions } from '../components/AddressActions';
 import { rpc } from '@/lib/messaging';
 import type { DexPair } from '@/lib/dexscreener';
 import type { Erc20Balance, AccountSummary } from '@/lib/evm';
+import type { TradeEntry } from '@/lib/trades';
 import { APE, TokenMeta, isNative, safeChecksum } from '@/lib/tokens';
 import { shortAddress } from '@/lib/wallet-utils';
 import { useApp } from '../store';
@@ -32,6 +33,9 @@ export default function TokenDetail() {
   const [loading, setLoading] = useState(true);
   const [timeframe, setTimeframe] = useState<TimeKey>('24H');
   const [balance, setBalance] = useState<number>(0);
+  const [trades, setTrades] = useState<TradeEntry[]>([]);
+  const [tradesLoading, setTradesLoading] = useState(false);
+  const [tradesErr, setTradesErr] = useState<string | null>(null);
 
   const token: TokenMeta = native
     ? APE
@@ -45,6 +49,29 @@ export default function TokenDetail() {
       .catch(() => setPair(null))
       .finally(() => setLoading(false));
   }, [address, native]);
+
+  // Recent trades — pulled once the pair address is known. Each
+  // page load is 4 RPC calls (token0 + getBlockNumber +
+  // getBlock(latest) + getLogs); subsequent re-mounts re-fetch
+  // because trades change rapidly.
+  useEffect(() => {
+    const pairAddr = pair?.pairAddress;
+    const baseAddr = pair?.baseToken?.address;
+    if (!pairAddr || !baseAddr) return;
+    setTradesLoading(true);
+    setTradesErr(null);
+    void rpc({
+      type: 'dex.recentTrades',
+      pairAddress: pairAddr,
+      baseTokenAddress: baseAddr,
+      baseDecimals: 18,
+      quoteDecimals: 18,
+      limit: 25,
+    })
+      .then((list) => { setTrades(list); setTradesErr(null); })
+      .catch((e) => { setTrades([]); setTradesErr((e as Error).message); })
+      .finally(() => setTradesLoading(false));
+  }, [pair?.pairAddress, pair?.baseToken?.address]);
 
   // Pull this token's balance for the user — reused in the info card and
   // also in the action buttons' navigation state.
@@ -182,6 +209,56 @@ export default function TokenDetail() {
               value={change24 != null ? `${change24 >= 0 ? '+' : ''}${change24.toFixed(2)}%` : '—'}
               tone={change24 == null ? undefined : change24 >= 0 ? 'ok' : 'bad'}
             />
+          </div>
+
+          {/* Recent trades — last ~25 Camelot V2 swaps for the pair.
+              Trader column links to apescan. */}
+          <div className="card mb-3">
+            <div className="font-bold mb-2" style={{ fontSize: 15 }}>Recent trades</div>
+            {tradesLoading && trades.length === 0 ? (
+              <div className="text-ink-faint font-bold text-center py-2" style={{ fontSize: 12 }}>
+                Loading trades…
+              </div>
+            ) : tradesErr ? (
+              <div className="text-danger font-bold text-center py-2" style={{ fontSize: 11 }}>
+                {tradesErr}
+              </div>
+            ) : trades.length === 0 ? (
+              <div className="text-ink-faint font-bold text-center py-2" style={{ fontSize: 12 }}>
+                No recent trades.
+              </div>
+            ) : (
+              <div className="space-y-1">
+                {trades.map((t) => {
+                  const usd = priceUsd != null ? t.baseAmount * priceUsd : null;
+                  return (
+                    <a
+                      key={t.txHash}
+                      href={`https://apescan.io/tx/${t.txHash}`}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="flex items-center justify-between hover:bg-bg-soft rounded px-1.5 py-1"
+                    >
+                      <span
+                        className={`font-bold uppercase tracking-wider ${t.type === 'buy' ? 'text-success' : 'text-danger'}`}
+                        style={{ fontSize: 11, width: 36 }}
+                      >
+                        {t.type}
+                      </span>
+                      <span className="font-bold flex-1 text-right" style={{ fontSize: 12 }}>
+                        {trimNum(t.baseAmount)} {token.symbol}
+                      </span>
+                      <span className="font-bold text-ink-faint text-right" style={{ fontSize: 12, width: 80 }}>
+                        {usd != null ? `$${formatBig(usd)}` : `${trimNum(t.quoteAmount)} APE`}
+                      </span>
+                      <span className="font-bold text-ink-faint text-right" style={{ fontSize: 11, width: 56 }}>
+                        {formatRelTime(t.timestamp)}
+                      </span>
+                    </a>
+                  );
+                })}
+              </div>
+            )}
           </div>
 
           {/* Contract row: short address + copy + apescan icons */}
@@ -362,6 +439,23 @@ function formatPrice(n: number): string {
   if (n >= 1) return n.toLocaleString(undefined, { maximumFractionDigits: 4 });
   if (n >= 0.01) return n.toFixed(4);
   return n.toFixed(8).replace(/0+$/, '').replace(/\.$/, '');
+}
+
+function trimNum(n: number): string {
+  if (!Number.isFinite(n) || n === 0) return '0';
+  if (n < 0.001) return n.toExponential(2);
+  if (n < 1) return n.toFixed(4).replace(/0+$/, '').replace(/\.$/, '');
+  if (n < 1000) return n.toFixed(2).replace(/0+$/, '').replace(/\.$/, '');
+  return formatBig(n);
+}
+
+function formatRelTime(unixSec: number): string {
+  if (!Number.isFinite(unixSec) || unixSec <= 0) return '';
+  const diff = Math.floor(Date.now() / 1000) - unixSec;
+  if (diff < 60) return `${diff}s`;
+  if (diff < 3600) return `${Math.floor(diff / 60)}m`;
+  if (diff < 86_400) return `${Math.floor(diff / 3600)}h`;
+  return `${Math.floor(diff / 86_400)}d`;
 }
 
 function formatBig(n: number): string {

@@ -7,6 +7,7 @@ import ImportWallet from './screens/ImportWallet';
 import Unlock from './screens/Unlock';
 import Dashboard from './screens/Dashboard';
 import Send from './screens/Send';
+import SendNft from './screens/SendNft';
 import Receive from './screens/Receive';
 import Swap from './screens/Swap';
 import SearchScreen from './screens/Search';
@@ -17,6 +18,10 @@ import Accounts from './screens/Accounts';
 import ConnectedSites from './screens/ConnectedSites';
 import RequestApproval from './screens/RequestApproval';
 import Chat from './screens/Chat';
+import Achievements from './screens/Achievements';
+import Profile from './screens/Profile';
+import CollectionView from './screens/CollectionView';
+import { AchievementToast } from './components/AchievementToast';
 
 export default function App() {
   const { initialized, unlocked, refreshStatus, refreshSettings } = useApp();
@@ -57,19 +62,28 @@ export default function App() {
   }
 
   return (
-    <Routes>
-      <Route path="/" element={<Dashboard />} />
-      <Route path="/send" element={<Send />} />
-      <Route path="/receive" element={<Receive />} />
-      <Route path="/swap" element={<Swap />} />
-      <Route path="/search" element={<SearchScreen />} />
-      <Route path="/token/:address" element={<TokenDetail />} />
-      <Route path="/history" element={<History />} />
-      <Route path="/chat" element={<Chat />} />
-      <Route path="/settings" element={<Settings />} />
-      <Route path="/settings/sites" element={<ConnectedSites />} />
-      <Route path="/accounts" element={<Accounts />} />
-      <Route path="*" element={<Navigate to="/" replace />} />
-    </Routes>
+    <>
+      <Routes>
+        <Route path="/" element={<Dashboard />} />
+        <Route path="/send" element={<Send />} />
+        <Route path="/send-nft" element={<SendNft />} />
+        <Route path="/receive" element={<Receive />} />
+        <Route path="/swap" element={<Swap />} />
+        <Route path="/search" element={<SearchScreen />} />
+        <Route path="/token/:address" element={<TokenDetail />} />
+        <Route path="/history" element={<History />} />
+        <Route path="/chat" element={<Chat />} />
+        <Route path="/settings" element={<Settings />} />
+        <Route path="/settings/sites" element={<ConnectedSites />} />
+        <Route path="/accounts" element={<Accounts />} />
+        <Route path="/achievements" element={<Achievements />} />
+        <Route path="/profile/:address" element={<Profile />} />
+        <Route path="/collection/:contract" element={<CollectionView />} />
+        <Route path="*" element={<Navigate to="/" replace />} />
+      </Routes>
+      {/* Mounted here so newly-unlocked achievements can pop over any
+          screen the user happens to be on when sync resolves. */}
+      <AchievementToast />
+    </>
   );
 }

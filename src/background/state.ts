@@ -7,7 +7,17 @@ import type { PendingRequest } from '@/lib/messaging';
 interface BgState {
   unlocked: VaultData | null;
   unlockedAt: number;
-  pending: Map<string, PendingRequest & { resolve: (v: unknown) => void; reject: (e: Error) => void }>;
+  pending: Map<
+    string,
+    PendingRequest & {
+      resolve: (v: unknown) => void;
+      reject: (e: Error) => void;
+      /** Audit H2: account the request is bound to. The approval
+       * resolver signs with exactly this account, never with
+       * whatever happens to be active at click-time. */
+      accountId?: string;
+    }
+  >;
   approvedOrigins: Set<string>;
 }
 

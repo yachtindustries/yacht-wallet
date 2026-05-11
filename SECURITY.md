@@ -4,7 +4,7 @@ This document describes Yacht's threat model — what the wallet defends
 against, what it does **not** defend against, and what users and operators
 must do to use it safely.
 
-_Last updated: 2026-05-04_
+_Last updated: 2026-05-10_
 
 ## TL;DR for users
 
@@ -110,6 +110,48 @@ can only do so much; the items above are non-negotiable for production.
 | Phishing list is small, hard-coded | Replace with a maintained signed feed fetched periodically. |
 | No automatic dependency vulnerability monitoring | Add Dependabot + scheduled `npm audit` in CI. |
 | No CI / signed releases | Set up GitHub Actions signing the build with cosign or similar. |
+
+## Mobile (Capacitor / Android) threat model
+
+The mobile app reuses the same TypeScript core (vault, signing, dApp RPC
+validation) as the extension; everything in the table above applies.
+What's different on mobile:
+
+### At-rest defences
+
+| Layer | Defence |
+| --- | --- |
+| **Inner vault encryption** | Same AES-256-GCM + Argon2id (m=64 MiB, t=3, p=1) as the extension — the encrypted blob is identical bytes-on-disk to the desktop version. |
+| **Outer Keystore wrap** *(Android only)* | Before the encrypted blob is written to `SharedPreferences`, it is wrapped a SECOND time with an AES-256-GCM key generated and held inside the Android Keystore. StrongBox-backed on devices that have it (Pixel 3+, Galaxy S20+); TEE-backed on every other Android. The Keystore key never leaves the secure hardware — the app receives `Cipher` handles only. **Result**: an attacker who copies the vault file off the device cannot even *start* a brute-force on the password, because they can't strip the outer wrap without running code inside this app on this same device. |
+| **No Android backup** | `android:allowBackup="false"`, `android:fullBackupContent="false"`, and `data_extraction_rules.xml` exclude every storage domain (`root`, `file`, `database`, `sharedpref`) from cloud backup AND device-to-device transfer. The vault is intentionally not portable across devices — users must use the recovery phrase. |
+| **Backups disabled at app level too** | `chrome.storage.session` (cached AES key + decrypted vault) maps to an in-memory Map on mobile, never written to disk. |
+
+### In-transit defences
+
+| Defence | Detail |
+| --- | --- |
+| **Cleartext traffic blocked at OS level** | `network_security_config.xml` sets `cleartextTrafficPermitted="false"` and `<trust-anchors><certificates src="system" /></trust-anchors>` only — user-installed CAs (e.g. corporate MITM profiles) are NOT trusted. |
+| **TLS for every endpoint** | RPC, dexscreener, opensea, IPFS gateways all served over HTTPS. |
+
+### In-use defences
+
+| Defence | Detail |
+| --- | --- |
+| **FLAG_SECURE** | `MainActivity.onCreate` sets `WindowManager.LayoutParams.FLAG_SECURE` before `super.onCreate`, so the wallet **cannot** be screenshotted, screen-recorded, or appear in the Recent Apps thumbnail. The seed-phrase reveal screen, address bar, balances — none of it leaks via system snapshots. |
+| **Lock-on-background** | When the app loses foreground (`appStateChange.isActive=false` from `@capacitor/app`), the vault locks immediately. The user must re-enter their password to use the wallet again. This is stricter than the desktop auto-lock alarm. |
+| **Memory hygiene** | Cached AES key bytes are `Uint8Array.fill(0)`-zeroed before the reference is cleared, so a JS heap dump after lock cannot recover the key. |
+| **R8 minification & obfuscation** | Release builds run R8 with `proguard-android-optimize.txt`, stripping field/method names and removing dead code from the Java/Kotlin layer. The JS bundle is separately minified by Vite/esbuild with `drop: ['console','debugger']`. |
+| **Debuggable disabled in release** | `debuggable false` on the release build type, so a stolen device can't be `adb`-attached without re-signing the APK. |
+| **Portrait-locked Activity** | Avoids landscape-only quirks; reduces UI surface area for rendering bugs that could expose secret data. |
+
+### Mobile-specific out-of-scope items
+
+| Threat | Plan |
+| --- | --- |
+| Rooted device + active malware running as root | Effectively no defence is possible. Users running a rooted phone should be assumed to have weakened security boundaries; recommend a hardware wallet. |
+| Biometric unlock | Not yet wired up. v0.2 will add an optional second Keystore key gated on `setUserAuthenticationRequired(true)` so users can unlock with fingerprint/face after the first password setup, without ever skipping the underlying password. |
+| iOS port | Capacitor project exists; the SecureStorage plugin currently has only an Android implementation. iOS implementation will use Keychain Services with `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly` + `SecAccessControl` (biometric optional). |
+| Hardware-wallet integration | Same as desktop — Ledger via WebHID isn't supported on mobile WebView. Plan: Bluetooth Ledger via a custom Capacitor plugin. |
 
 ## Reporting a vulnerability
 

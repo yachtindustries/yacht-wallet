@@ -1,10 +1,71 @@
+# =============================================================================
+# JS / Node
+# =============================================================================
 node_modules
 dist
+dist-mobile
 dist-zip
-.DS_Store
+.vite
+tsconfig.tsbuildinfo
 *.log
 .env
 .env.local
-.vite
-tsconfig.tsbuildinfo
 .claude
+
+# Compiled-from-TS noise: with tsconfig#noEmit:true and Vite owning emission
+# we should never ship `.js` next to a `.ts(x)` source. Block them here so a
+# rogue `tsc` (or a build system that forgets `--noEmit`) can't reintroduce
+# the shadow-resolution bug.
+src/**/*.js
+vite.config.js
+manifest.config.js
+
+# =============================================================================
+# Android (Capacitor)
+# =============================================================================
+android/build/
+android/app/build/
+android/app/release/
+android/local.properties
+android/.gradle/
+android/captures/
+android/.idea/
+android/*.iml
+android/app/*.iml
+android/build/reports/
+
+# RELEASE SIGNING — NEVER COMMIT THESE
+# If you accidentally push a release keystore to GitHub, rotate it
+# immediately (you can't change the upload key once Play has accepted
+# a release, but you can stop using it for new bundles).
+android/keystore.properties
+android/app/*.keystore
+android/app/*.jks
+android/app/release-key.*
+android/app/google-services.json
+
+# =============================================================================
+# iOS (Capacitor) — kept for the future iOS submission
+# =============================================================================
+ios/build/
+ios/App/build/
+ios/App/Pods/
+ios/App/Podfile.lock
+ios/App/.xcode.env.local
+ios/App/App.xcworkspace/xcuserdata/
+ios/App/App.xcodeproj/xcuserdata/
+ios/App/App.xcodeproj/project.xcworkspace/xcuserdata/
+ios/App/App/keys.plist
+ios/App/App/GoogleService-Info.plist
+ios/DerivedData/
+ios/*.ipa
+
+# =============================================================================
+# OS / IDE
+# =============================================================================
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*~

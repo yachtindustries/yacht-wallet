@@ -6,7 +6,7 @@ export default function Welcome() {
   return (
     <div
       className="flex flex-col h-full px-6 py-5"
-      style={{ backgroundColor: '#f6c87e' }}
+      style={{ backgroundColor: '#002849' }}
     >
       <div className="text-center">
         <h1 className="text-2xl font-bold tracking-tight text-white">Yacht</h1>

@@ -16,7 +16,7 @@ export default function Receive() {
     QRCode.toDataURL(active.address, {
       margin: 1,
       width: QR_SIZE,
-      color: { dark: '#ffffff', light: '#f6c87e' },
+      color: { dark: '#ffffff', light: '#002849' },
     }).then(setQr);
   }, [active?.address]);
 
@@ -38,7 +38,7 @@ export default function Receive() {
             type="button"
             onClick={copy}
             className="bg-white rounded-xl px-3 py-3 break-all font-bold w-full text-center hover:opacity-90"
-            style={{ marginTop: '20%', fontSize: 16, color: '#f6c87e' }}
+            style={{ marginTop: '20%', fontSize: 16, color: '#002849' }}
             aria-label="Copy address"
             title="Click to copy"
           >

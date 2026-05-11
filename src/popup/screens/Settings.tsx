@@ -24,10 +24,22 @@ export default function Settings() {
 
   if (!settings) return null;
 
-  // Tailwind's `appearance-none` strips the native dropdown arrow on
-  // <select>. Used on every select in this menu.
+  // Subtle grey "pill" so the user knows the value is clickable. The
+  // page sits on a white card, so a 5% black overlay reads as a very
+  // light grey without competing with the surrounding cards. A small
+  // chevron is appended on the right via background-image so the
+  // dropdown affordance is unambiguous even with `appearance-none`.
   const selectClasses =
-    'w-full bg-bg-soft border border-line rounded-xl px-3 py-2.5 font-bold text-ink focus:outline-none focus:border-brand appearance-none';
+    'w-full rounded-xl px-3 py-2.5 font-bold text-ink focus:outline-none focus:border-brand appearance-none cursor-pointer';
+  const selectStyle: React.CSSProperties = {
+    backgroundColor: 'rgba(0,0,0,0.05)',
+    border: '1px solid rgba(0,0,0,0.08)',
+    backgroundImage:
+      'url("data:image/svg+xml;utf8,<svg xmlns=\'http://www.w3.org/2000/svg\' width=\'12\' height=\'8\' viewBox=\'0 0 12 8\'><path fill=\'none\' stroke=\'%230a0e14\' stroke-width=\'2\' stroke-linecap=\'round\' stroke-linejoin=\'round\' d=\'M1 1l5 5 5-5\'/></svg>")',
+    backgroundRepeat: 'no-repeat',
+    backgroundPosition: 'right 12px center',
+    paddingRight: 32,
+  };
 
   return (
     <Screen>
@@ -43,7 +55,7 @@ export default function Settings() {
           <div className="text-ink-dim mb-2 font-bold" style={{ fontSize: 15 }}>Auto-lock</div>
           <select
             className={selectClasses}
-            style={{ fontSize: 16 }}
+            style={{ ...selectStyle, fontSize: 16 }}
             value={settings.autoLockMinutes}
             onChange={(e) => setAutoLock(Number(e.target.value))}
             disabled={busy}
@@ -60,7 +72,7 @@ export default function Settings() {
           <div className="text-ink-dim mb-2 font-bold" style={{ fontSize: 15 }}>Display currency</div>
           <select
             className={selectClasses}
-            style={{ fontSize: 16 }}
+            style={{ ...selectStyle, fontSize: 16 }}
             value={settings.fiatCurrency}
             onChange={(e) => setFiat(e.target.value as 'usd' | 'eur' | 'gbp')}
             disabled={busy}
@@ -80,14 +92,13 @@ export default function Settings() {
         </Link>
 
         <button
-          className="btn w-full font-bold text-white"
-          style={{ backgroundColor: '#f6c87e' }}
+          className="btn w-full font-bold text-white bg-[#5eccfa] hover:bg-[#3eb8e8]"
           onClick={lock}
         >
           Lock wallet
         </button>
 
-        <p className="text-ink-faint text-center mt-3 font-bold" style={{ fontSize: 14 }}>Yacht v0.1.0</p>
+        <p className="text-white/70 text-center mt-3 font-bold" style={{ fontSize: 14 }}>Yacht v0.1.5</p>
       </Page>
     </Screen>
   );

@@ -26,7 +26,7 @@ export default function ConnectedSites() {
     <Screen>
       <TopBar title="Connected sites" />
       <Page>
-        {loading && <div className="text-ink-dim text-sm">Loading…</div>}
+        {loading && <div className="text-white/85 text-sm">Loading…</div>}
         {!loading && origins.length === 0 && (
           <div className="card text-center text-sm text-ink-dim py-6">
             No sites connected.
@@ -42,13 +42,17 @@ export default function ConnectedSites() {
             return (
               <div key={o} className="card flex justify-between items-center">
                 <div className="min-w-0 flex-1">
-                  <div className="text-sm font-medium truncate">{host}</div>
-                  <div className="text-[11px] text-ink-faint truncate font-mono">{o}</div>
+                  <div className="font-bold truncate" style={{ fontSize: 18 }}>{host}</div>
+                  <div className="text-ink-faint truncate font-mono font-bold" style={{ fontSize: 14 }}>{o}</div>
                   {homograph && (
-                    <div className="text-[11px] text-warn mt-0.5">⚠ Possible look-alike domain</div>
+                    <div className="text-warn mt-0.5 font-bold" style={{ fontSize: 14 }}>⚠ Possible look-alike domain</div>
                   )}
                 </div>
-                <button className="text-xs text-danger hover:underline ml-2" onClick={() => revoke(o)}>
+                <button
+                  className="text-danger hover:underline ml-2 font-bold"
+                  style={{ fontSize: 15 }}
+                  onClick={() => revoke(o)}
+                >
                   Revoke
                 </button>
               </div>

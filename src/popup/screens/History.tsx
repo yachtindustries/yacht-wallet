@@ -60,7 +60,7 @@ function ActionGlyph({ type }: ActionGlyphProps) {
       aria-hidden
       className="block w-3.5 h-3.5"
       style={{
-        backgroundColor: '#6b4423',
+        backgroundColor: '#000000',
         WebkitMaskImage: `url(${url})`,
         maskImage: `url(${url})`,
         WebkitMaskRepeat: 'no-repeat',
@@ -145,7 +145,7 @@ export default function History() {
                 key={f.key}
                 onClick={() => setFilter(f.key)}
                 className={`flex-1 py-1.5 rounded-lg font-bold transition ${
-                  active ? 'bg-white text-ink' : 'bg-bg-soft text-ink-dim hover:bg-white/40'
+                  active ? 'bg-white text-ink' : 'bg-white/10 text-white/85 hover:bg-white/20'
                 }`}
                 style={{ fontSize: 14 }}
               >
@@ -154,10 +154,10 @@ export default function History() {
             );
           })}
         </div>
-        {loading && <div className="text-ink-dim text-sm">Loading…</div>}
+        {loading && <div className="text-white/85 text-sm">Loading…</div>}
         {err && <div className="text-danger text-xs">{err}</div>}
         {!loading && visible.length === 0 && (
-          <div className="text-center text-ink-dim text-sm mt-12">
+          <div className="text-center text-white/85 text-sm mt-12">
             <div className="text-3xl mb-2">≡</div>
             No transactions yet.
           </div>
@@ -234,7 +234,7 @@ export default function History() {
                       <div className="font-bold text-ink-dim" style={{ fontSize: 16 }}>—</div>
                     )}
                     <div className="mt-0.5 flex items-center justify-end gap-1" style={{ fontSize: 12 }}>
-                      <span className={t.status === 'success' ? 'text-ink-faint' : 'text-danger'}>
+                      <span className={t.status === 'success' ? 'text-ink-faint' : 'text-black font-bold'}>
                         {t.status === 'success' ? 'Success' : t.status === 'failed' ? 'Failed' : 'Pending'}
                       </span>
                       {t.status !== 'pending' && <StatusBadge ok={t.status === 'success'} sizeEm={1.1} />}
@@ -297,7 +297,10 @@ function StatusBadge({ ok, sizeEm }: { ok: boolean; sizeEm: number }) {
 function Amount({ t, sign }: { t: HistoryTransfer; sign: string }) {
   const symbol = t.native ? 'APE' : (t.tokenSymbol ?? 'TOKEN');
   const amount = parseFloat(t.amount).toLocaleString(undefined, { maximumFractionDigits: 3 });
-  const color = sign === '+' ? 'text-success' : sign === '-' ? 'text-danger' : 'text-ink';
+  // Receive (+) renders water blue; Send (−) is plain black; self / swap-leg
+  // labels stay black. The previous green-on-red palette read as
+  // gain/loss; the new colour pair feels neutral and brand-aligned.
+  const color = sign === '+' ? 'text-[#5eccfa]' : 'text-black';
   return (
     <div className={`font-bold ${color}`} style={{ fontSize: 16 }}>
       {sign}{amount} {symbol}

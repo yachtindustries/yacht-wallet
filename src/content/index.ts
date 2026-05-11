@@ -75,9 +75,22 @@ window.addEventListener('message', async (event) => {
       }
       case 'personal_sign': {
         const params = data.params as any[];
-        // EIP-1193 personal_sign argument order: [message, address] (some
-        // wallets reverse). We forward the message and let the user approve.
-        const message = typeof params?.[0] === 'string' ? params[0] : typeof params?.[1] === 'string' ? params[1] : '';
+        // Standard EIP-1193 order is [message, address]. MetaMask
+        // historically also accepts the reversed [address, message]
+        // and a number of older dApps still ship that form. We pick the
+        // arg that ISN'T a 20-byte address and treat it as the message
+        // — so a reversed call never ends up signing the address bytes.
+        const a = typeof params?.[0] === 'string' ? params[0] : '';
+        const b = typeof params?.[1] === 'string' ? params[1] : '';
+        const isAddr = (s: string) => /^0x[0-9a-fA-F]{40}$/.test(s);
+        let message = '';
+        if (a && b) {
+          if (isAddr(b) && !isAddr(a)) message = a;       // standard
+          else if (isAddr(a) && !isAddr(b)) message = b;  // reversed
+          else message = a;                                // both/neither
+        } else {
+          message = a || b;
+        }
         if (!message) return reply(false, 'Invalid message');
         const r = await rpc({ type: 'dapp.personalSign', message });
         return reply(true, r.signature);
@@ -104,13 +117,17 @@ window.addEventListener('message', async (event) => {
         return reply(false, 'Yacht only supports ApeChain (chainId 0x8173)');
       }
       case 'wallet_addEthereumChain': {
-        // Yacht is single-chain ApeChain. We accept the call only if the
-        // dApp supplies the correct ApeChain config — otherwise we refuse
-        // (so a dApp can't trick us into "approving" a malicious RPC URL by
-        // bundling it under chainId 0x8173).
+        // Yacht is single-chain ApeChain. The wallet uses its own RPC
+        // regardless of what the dApp suggests, so the dApp's rpcUrls /
+        // explorer / iconUrls fields are advisory only — they cannot
+        // change which RPC Yacht hits, and they cannot trick the wallet
+        // into trusting a malicious URL because the wallet never reads
+        // them. We therefore accept this call as long as the chain is
+        // ApeChain and the native currency (if specified) is APE.
+        // Refusing on rpcUrls mismatch was the historical implementation
+        // and broke OpenSea, which uses the Conduit RPC.
         const params = data.params?.[0] as {
           chainId?: string;
-          rpcUrls?: string[];
           nativeCurrency?: { symbol?: string; decimals?: number };
         } | undefined;
         if (params?.chainId !== '0x8173') {
@@ -119,10 +136,6 @@ window.addEventListener('message', async (event) => {
         const sym = params.nativeCurrency?.symbol;
         if (sym && sym !== 'APE') {
           return reply(false, 'ApeChain native currency must be APE');
-        }
-        const rpcs = params.rpcUrls ?? [];
-        if (rpcs.length > 0 && !rpcs.some((u) => u === 'https://rpc.apechain.com')) {
-          return reply(false, 'ApeChain RPC must be https://rpc.apechain.com (Yacht ignores dApp-supplied RPCs)');
         }
         return reply(true, null);
       }

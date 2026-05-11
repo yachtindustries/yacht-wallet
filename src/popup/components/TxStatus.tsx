@@ -1,42 +1,97 @@
-import { useEffect, useMemo } from 'react';
+import { useEffect, useMemo, useRef } from 'react';
 
 type Status = 'pending' | 'success' | 'error';
+
+const successSoundUrl = chrome.runtime.getURL('successsound.wav');
 
 interface Props {
   status: Status;
   message?: string;
   onDismiss?: () => void;
   autoDismissMs?: number;
+  /** When set + status is 'success', renders the image as a slowly
+   *  wobbling 3-D card in place of the standard ring + checkmark. */
+  imageUrl?: string;
 }
 
-export function TxStatus({ status, message, onDismiss, autoDismissMs = 3000 }: Props) {
+export function TxStatus({ status, message, onDismiss, autoDismissMs = 3000, imageUrl }: Props) {
+  // Hold the latest onDismiss in a ref so the auto-dismiss timer is armed
+  // exactly once per status transition. Without the ref, every parent
+  // re-render would pass a freshly-created onDismiss, the effect would
+  // re-run, and the timer would never get a chance to fire.
+  const onDismissRef = useRef(onDismiss);
+  useEffect(() => { onDismissRef.current = onDismiss; }, [onDismiss]);
+
   useEffect(() => {
     if (status === 'pending') return;
-    if (!onDismiss) return;
-    const t = window.setTimeout(onDismiss, autoDismissMs);
+    const t = window.setTimeout(() => onDismissRef.current?.(), autoDismissMs);
     return () => window.clearTimeout(t);
-  }, [status, onDismiss, autoDismissMs]);
+  }, [status, autoDismissMs]);
+
+  // Celebratory chime — same asset the Swap success uses, kept
+  // single-shot. Browsers may block autoplay until they see a
+  // user gesture, but every code path that opens this overlay
+  // (Send / Swap / NFT buy) is initiated by an explicit click,
+  // so we're inside an allowed window.
+  useEffect(() => {
+    if (status !== 'success') return;
+    try {
+      const a = new Audio(successSoundUrl);
+      a.volume = 0.6;
+      void a.play().catch(() => { /* browser blocked autoplay — silent */ });
+    } catch { /* Audio API unavailable */ }
+  }, [status]);
 
   const bg =
     status === 'success'
-      ? '#16a34a' // bright green
+      ? '#5eccfa'              // water blue — matches the brand's primary accent
       : status === 'error'
-      ? '#dc2626' // bright red
-      : undefined;
+      ? '#dc2626'              // bright red
+      : 'rgba(0,40,73,0.95)';  // pending — translucent navy (was warm brown)
 
   return (
     <div
       className="fixed inset-0 z-50 flex flex-col items-center justify-center transition-colors duration-300"
-      style={bg ? { backgroundColor: bg } : { backgroundColor: 'rgba(28,19,10,0.95)' }}
-      onClick={status !== 'pending' ? onDismiss : undefined}
+      style={{ backgroundColor: bg }}
+      onClick={status !== 'pending' ? () => onDismissRef.current?.() : undefined}
     >
       {status === 'success' && <Confetti />}
-      <Ring status={status} />
+      {status === 'success' && imageUrl ? (
+        <NftCube imageUrl={imageUrl} />
+      ) : (
+        <Ring status={status} />
+      )}
       {message && (
-        <div className={`mt-5 text-sm px-6 text-center font-bold ${status === 'pending' ? 'text-ink-dim' : 'text-white'}`}>
+        <div
+          className="mt-5 px-6 text-center font-bold text-white"
+          style={{ fontSize: 17 }}
+        >
           {message}
         </div>
       )}
+    </div>
+  );
+}
+
+function NftCube({ imageUrl }: { imageUrl: string }) {
+  // Flat 2-D card of the bought NFT. (The function name is kept
+  // as `NftCube` for call-site stability across builds; the visual
+  // is now a still image per request.)
+  return (
+    <div
+      className="rounded-2xl overflow-hidden"
+      style={{
+        width: 220,
+        height: 220,
+        boxShadow: '0 0 0 1px rgba(255,255,255,0.18), 0 16px 40px -12px rgba(0,0,0,0.45)',
+      }}
+    >
+      <img
+        src={imageUrl}
+        alt="NFT"
+        className="w-full h-full object-cover"
+        onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = 'none'; }}
+      />
     </div>
   );
 }

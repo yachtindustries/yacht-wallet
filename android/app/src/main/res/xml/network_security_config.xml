@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Network security config for Yacht. Cleartext (http://) is denied
+  globally; only HTTPS / WSS is permitted. The wallet talks to
+  apechain RPCs, dexscreener, opensea, and IPFS gateways — all of
+  which speak TLS in 2026. system CAs are trusted; user-installed
+  CAs are NOT, so a malicious profile that adds a corporate root CA
+  cannot intercept wallet traffic.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>

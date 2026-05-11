@@ -52,13 +52,13 @@ export default function ImportWallet() {
         <div className="grid grid-cols-2 gap-2 mb-3">
           <button
             onClick={() => setMode('mnemonic')}
-            className={`py-2 rounded-xl border text-sm ${mode === 'mnemonic' ? 'border-brand bg-brand/10 text-brand' : 'border-line bg-bg-soft text-ink-dim'}`}
+            className={`py-2 rounded-xl border font-bold text-sm ${mode === 'mnemonic' ? 'border-[#5eccfa] bg-[#5eccfa]/20 text-white' : 'border-white/30 bg-white/10 text-white/85'}`}
           >
             Recovery phrase
           </button>
           <button
             onClick={() => setMode('privateKey')}
-            className={`py-2 rounded-xl border text-sm ${mode === 'privateKey' ? 'border-brand bg-brand/10 text-brand' : 'border-line bg-bg-soft text-ink-dim'}`}
+            className={`py-2 rounded-xl border font-bold text-sm ${mode === 'privateKey' ? 'border-[#5eccfa] bg-[#5eccfa]/20 text-white' : 'border-white/30 bg-white/10 text-white/85'}`}
           >
             Private key
           </button>
@@ -73,7 +73,7 @@ export default function ImportWallet() {
           onChange={(e) => setSecret(e.target.value)}
           placeholder={mode === 'mnemonic' ? 'word1 word2 word3 …' : '0x…'}
         />
-        <p className="text-[11px] text-ink-faint mt-2">
+        <p className="text-[11px] text-white/70 mt-2">
           {mode === 'mnemonic'
             ? 'Standard BIP-39 phrase. Compatible with MetaMask, Rabby, Rainbow.'
             : 'Hex-encoded EVM private key. Imported accounts cannot derive new accounts.'}

@@ -53,7 +53,7 @@ export default function CreateWallet() {
       <Screen>
         <TopBar title="Create wallet" onBack={() => nav('/')} />
         <Page>
-          <h2 className="text-lg font-semibold mb-4">Set a password</h2>
+          <h2 className="text-lg font-semibold mb-4 text-white">Set a password</h2>
           <label className="label">Password</label>
           <div className="mb-3">
             <PasswordField value={pw} onChange={setPw} autoFocus showStrength />
@@ -69,7 +69,7 @@ export default function CreateWallet() {
           />
           {err && <div className="text-danger text-xs mb-2">{err}</div>}
           <button
-            className="btn w-full text-white font-bold bg-[#5eccfa] hover:bg-[#3eb8e8] disabled:opacity-100 flex items-center justify-center"
+            className="btn btn-shine w-full text-white font-bold disabled:opacity-100 flex items-center justify-center"
             style={{ minHeight: 44 }}
             disabled={disabled}
             onClick={createWallet}
@@ -87,16 +87,20 @@ export default function CreateWallet() {
       <Screen>
         <TopBar title="Backup phrase" onBack={() => setStep('password')} />
         <Page>
-          <div className="card border-warn/30 bg-warn/5 mb-3 text-xs text-warn">
+          {/* Body text on this screen is critical (recovery phrase, lose-
+              your-funds warning) so we deliberately render it ~30% larger
+              than the rest of the app and bold. Title in the TopBar stays
+              at its standard size for visual hierarchy. */}
+          <div className="card border-warn/30 bg-warn/5 mb-3 text-warn font-bold" style={{ fontSize: 15 }}>
             ⚠ This 12-word phrase is the ONLY way to recover your wallet. Write it down on
             paper and store it safely. Anyone with this phrase can spend your funds.
           </div>
           <div className="card mb-3">
             <div className="grid grid-cols-3 gap-2">
               {words.map((w, i) => (
-                <div key={i} className="bg-bg-soft border border-line rounded-lg px-2 py-1.5 text-xs">
-                  <span className="text-ink-faint mr-1">{i + 1}.</span>
-                  <span className="font-mono">{w}</span>
+                <div key={i} className="bg-bg-soft border border-line rounded-lg px-2 py-1.5 font-bold" style={{ fontSize: 17 }}>
+                  <span className="text-ink-faint mr-1 font-bold">{i + 1}.</span>
+                  <span className="font-mono font-bold">{w}</span>
                 </div>
               ))}
             </div>
@@ -104,7 +108,7 @@ export default function CreateWallet() {
               <CopyButton text={mnemonic} label="Copy phrase" clearAfterMs={60_000} />
             </div>
           </div>
-          <label className="flex items-start gap-2 text-xs text-ink-dim mt-2 mb-3 cursor-pointer">
+          <label className="flex items-start gap-2 text-white/85 font-bold mt-2 mb-3 cursor-pointer" style={{ fontSize: 16 }}>
             <input
               type="checkbox"
               checked={acknowledged}
@@ -114,7 +118,8 @@ export default function CreateWallet() {
             <span>I have saved my recovery phrase. I understand Yacht cannot recover it for me.</span>
           </label>
           <button
-            className="btn w-full text-white font-bold bg-[#5eccfa] hover:bg-[#3eb8e8] disabled:opacity-50"
+            className="btn btn-shine w-full text-white font-bold disabled:opacity-50"
+            style={{ fontSize: 18 }}
             disabled={!acknowledged}
             onClick={finalize}
           >

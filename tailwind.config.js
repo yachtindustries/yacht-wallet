@@ -5,24 +5,30 @@ export default {
   theme: {
     extend: {
       colors: {
-        // Light cream palette — non-Dashboard screens use this.
-        // The Dashboard paints its own water+deck background on top.
+        // Yacht navy is now the page background. The bg.* tokens below paint
+        // raised surfaces — cards, inputs, pills — and are pure white with
+        // no visible outline. The legacy `line` token is kept transparent
+        // so existing `border-line` references render but are invisible.
         bg: {
-          DEFAULT: '#fbf3df',  // base — light warm cream
-          soft:    '#f4ead0',  // input / sub-bar background (slightly darker)
-          card:    '#ffffff',  // raised cards & sheets
+          DEFAULT: '#ffffff',
+          soft:    '#ffffff',
+          card:    '#ffffff',
         },
-        line: '#e6d8b3',
+        line: 'transparent',
         ink: {
-          DEFAULT: '#2e2114',  // deep brown text
-          dim:     '#6b4423',
-          faint:   '#9b7e58',
+          DEFAULT: '#0a0e14',  // near-black body text on white surfaces
+          dim:     '#3a4250',
+          faint:   '#6b7280',
         },
         brand: {
-          DEFAULT: '#cc7a18',
-          dark:    '#a35d10',
-          soft:    '#fce4c0',
+          // Brand accent is now water blue. Used for primary buttons / links
+          // / focus rings on light surfaces.
+          DEFAULT: '#5eccfa',
+          dark:    '#3eb8e8',
+          soft:    '#cfeefd',
         },
+        // Success stays green so "+5%" change indicators read intuitively.
+        // The TxStatus screen overrides its bg inline to water-blue.
         success: { DEFAULT: '#16a34a', soft: '#dcfce7' },
         warn: '#d97706',
         danger: '#dc2626',

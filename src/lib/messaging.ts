@@ -5,7 +5,12 @@ import type { VaultAccount, VaultMeta } from './vault';
 import type { AccountSummary, Erc20Balance, Erc20Info, HistoryEntry, OwnedNft, SendResult } from './evm';
 import type { SwapQuote, SwapToken } from './camelot';
 import type { DexPair } from './dexscreener';
-import type { ChatMessage } from './chat';
+import type { ChatMessage, TipTotal } from './chat';
+import type { SyncResult, AchievementSnapshot, RankResult } from './achievements';
+import type { TopNftRow } from './topnfts';
+import type { ListingsPage, CollectionTrait } from './opensea';
+import type { TopUser } from './topusers';
+import type { TradeEntry } from './trades';
 
 export interface UnsignedEvmTx {
   to?: string;
@@ -54,6 +59,7 @@ export type RpcRequest =
   | { type: 'evm.erc20.balances'; tokens: string[]; address: string }
   | { type: 'evm.send.native'; from: string; to: string; amount: string }
   | { type: 'evm.send.erc20'; from: string; token: string; to: string; amount: string }
+  | { type: 'evm.send.nft'; from: string; contract: string; tokenId: string; to: string }
   | { type: 'swap.quote'; tokenIn: SwapToken; tokenOut: SwapToken; amountIn: string }
   | {
       type: 'swap.execute';
@@ -72,6 +78,48 @@ export type RpcRequest =
   | { type: 'dex.trending'; limit?: number }
   | { type: 'chat.send'; account: string; text: string }
   | { type: 'chat.list'; limit?: number }
+  | { type: 'chat.tip'; account: string; toAuthor: string; messageHash: string; apeAmount: string }
+  | { type: 'chat.tips'; entries: { messageHash: string; author: string }[] }
+  | { type: 'achievements.snapshot'; address: string }
+  | { type: 'achievements.sync'; address: string; force?: boolean }
+  | { type: 'username.get'; accountId: string }
+  | { type: 'username.set'; accountId: string; username: string }
+  | { type: 'rank.get'; address: string; force?: boolean }
+  | { type: 'nft.topcollections' }
+  | { type: 'nft.vote'; account: string; collection: string; apeAmount: string }
+  | { type: 'nft.listings'; contract: string; limit?: number; cursor?: string }
+  | { type: 'nft.collectionTraits'; contract: string }
+  | { type: 'users.top'; force?: boolean }
+  | { type: 'tokens.top'; limit?: number }
+  | { type: 'nft.collectionFloor'; contract: string }
+  | { type: 'nft.detail'; contract: string; tokenId: string }
+  | { type: 'pfp.set'; account: string; contract: string; tokenId: string }
+  | { type: 'pfp.clear'; account: string }
+  | { type: 'pfp.get'; address: string; force?: boolean }
+  | { type: 'dex.recentTrades'; pairAddress: string; baseTokenAddress: string; baseDecimals?: number; quoteDecimals?: number; limit?: number }
+  | {
+      type: 'nft.buy';
+      account: string;
+      /** Listing identity. */
+      orderHash: string;
+      protocolAddress: string;
+      chain: string;
+      /** Contract address of the NFT being bought — validated against
+       * the Top NFTs registry. */
+      contract: string;
+      /** Token ID the user clicked on — verified against the
+       * Seaport order's `offer[0].identifierOrCriteria` so a
+       * compromised OpenSea response can't swap us onto a
+       * different NFT. */
+      tokenId: string;
+      /** Pre-fetched Seaport protocol_data from the listing response.
+       * If present and complete the wallet uses it directly; otherwise
+       * it round-trips to OpenSea's fulfillment endpoint. */
+      protocolData?: any;
+      /** Maximum APE the user is willing to spend (defence against
+       * mid-flight price changes / mis-encoded orders). */
+      maxApe: string;
+    }
   // dApp-originated. Origin is omitted: the background derives it from sender.
   | { type: 'dapp.connect' }
   | { type: 'dapp.getAddress' }
@@ -115,6 +163,7 @@ export interface RpcResponseMap {
   'evm.erc20.balances': Erc20Balance[];
   'evm.send.native': SendResult;
   'evm.send.erc20': SendResult;
+  'evm.send.nft': SendResult;
   'swap.quote': SwapQuote | null;
   'swap.execute': { approval: { hash: string } | null; swap: SendResult };
   'evm.sign.tx': SendResult;
@@ -125,6 +174,26 @@ export interface RpcResponseMap {
   'dex.trending': DexPair[];
   'chat.send': SendResult;
   'chat.list': ChatMessage[];
+  'chat.tip': SendResult;
+  'chat.tips': TipTotal[];
+  'achievements.snapshot': AchievementSnapshot;
+  'achievements.sync': SyncResult;
+  'username.get': { username: string };
+  'username.set': { username: string };
+  'rank.get': RankResult;
+  'nft.topcollections': TopNftRow[];
+  'nft.vote': SendResult;
+  'nft.listings': ListingsPage;
+  'nft.collectionTraits': CollectionTrait[];
+  'users.top': TopUser[];
+  'tokens.top': Array<DexPair & { apeVoted: number; voteCount: number }>;
+  'nft.collectionFloor': { floorApe: number | null; slug: string | null };
+  'nft.detail': { name: string | null; image: string | null; rarityRank: number | null };
+  'pfp.set': SendResult;
+  'pfp.clear': SendResult;
+  'pfp.get': { contract: string; tokenId: string } | null;
+  'dex.recentTrades': TradeEntry[];
+  'nft.buy': SendResult;
   'dapp.connect': { address: string; chainId: string };
   'dapp.getAddress': { address: string; chainId: string; network: NetworkId };
   'dapp.signTx': SendResult;
